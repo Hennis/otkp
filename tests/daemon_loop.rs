@@ -184,7 +184,10 @@ fn config() -> ServerConfig {
     cfg.open_range = PortRange::new(50_000, 50_009).unwrap();
     cfg.knock_count_min = 3;
     cfg.knock_count_max = 3;
-    cfg.ban_threshold = 1;
+    // Threshold 1 keeps these tests focused on the knock/authorise path; the
+    // rate-limit behaviour has its own unit tests in `src/engine.rs`.
+    cfg.ban_fail_threshold = 1;
+    cfg.ban_window_seconds = 3600;
     cfg.ban_ttl_seconds = 0; // permanent, so the test cannot race a TTL
     cfg.open_ttl_seconds = 30;
     cfg.step_seconds = 30;

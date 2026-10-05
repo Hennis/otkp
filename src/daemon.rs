@@ -612,7 +612,8 @@ mod tests {
         config.open_range = PortRange::new(50_000, 50_009).unwrap();
         config.knock_count_min = 3;
         config.knock_count_max = 3;
-        config.ban_threshold = 1;
+        config.ban_fail_threshold = 1;
+        config.ban_window_seconds = 3600;
         config.ban_ttl_seconds = 0; // permanent for the test
         config.open_ttl_seconds = 30;
         config.firewall = FirewallConfig::DryRun;

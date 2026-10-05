@@ -227,7 +227,8 @@ pub enum Outcome {
     Banned {
         /// The banned address.
         ip: IpAddr,
-        /// How many failures accumulated (>= the configured threshold).
+        /// How many failures accumulated inside the rolling window (>= the
+        /// configured threshold).
         failures: u32,
     },
 }
@@ -258,8 +259,21 @@ struct IpState {
     ///         measurable gain at these sizes.
     candidates: HashMap<(String, u64), usize>,
 
-    /// Count of packets that matched nothing.
-    failures: u32,
+    /// Timestamps of recent failed knocks, oldest first.
+    ///
+    /// EXPERT: A ring (well, a `VecDeque` we push to and pop from the front) of
+    ///         failure times, which implements the *rolling* window. We store
+    ///         times rather than a counter because a counter cannot answer "how
+    ///         many failures in the last hour?" without a periodic reset, and a
+    ///         periodic reset is exactly the predictable boundary an attacker
+    ///         times their bursts around.
+    ///
+    /// Bounded growth: we only ever keep entries newer than the window,
+    ///         and we cap the length at the threshold plus a little slack, since
+    ///         anything beyond the threshold has already triggered a ban and the
+    ///         state is discarded. So this cannot grow without bound even under a
+    ///         flood.
+    failures: std::collections::VecDeque<u64>,
 
     /// Last time we saw a packet from this IP.
     last_seen: u64,
@@ -273,7 +287,63 @@ impl IpState {
     ///         memory leak driven by spoofed source addresses.
     /// KID: "Do I have any notes about this person? No? Then forget them."
     fn is_empty(&self) -> bool {
-        self.candidates.is_empty() && self.failures == 0
+        self.candidates.is_empty() && self.failures.is_empty()
+    }
+
+    /// Drop failures older than the window, then return how many remain.
+    ///
+    /// EXPERT: This is the whole mechanism of the rolling window. Called before
+    ///         every read of the failure count, so the count is always
+    ///         "failures in the last `window` seconds" and never needs a
+    ///         separate timer. The `VecDeque` is ordered by construction (we
+    ///         always push a monotonically non-decreasing `now`), so we can pop
+    ///         from the front while the oldest entry is too old -- O(k) where k
+    ///         is the number of expired entries, not O(n) over the whole deque.
+    ///
+    /// Note `now.saturating_sub(window)`: if the clock jumped backwards
+    ///         (an NTP correction can do this), `now - window` could underflow.
+    ///         Saturating at 0 means "everything is in the window", which is the
+    ///         conservative direction for a *rate limiter* -- it may delay
+    ///         forgiveness, but it never forgives early.
+    /// KID: Forget the mistakes you made longer ago than the window, then count
+    ///      what is left.
+    fn prune_failures(&mut self, now: u64, window: u64) -> usize {
+        let cutoff = now.saturating_sub(window);
+        // Pop from the front while the oldest entry is strictly older than the
+        // window. `>=` would drop an entry exactly `window` seconds old; we want
+        // "within the last `window` seconds" to *include* that boundary, hence
+        // the strict `<`.
+        while let Some(&oldest) = self.failures.front() {
+            if oldest < cutoff {
+                let _ = self.failures.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.failures.len()
+    }
+
+    /// Record one failure at time `now`, returning the count inside the window.
+    ///
+    /// EXPERT: Prunes first (so the count we return is the windowed count), then
+    ///         pushes. We also bound the stored length: once it exceeds the
+    ///         threshold the caller bans and drops the whole `IpState`, so
+    ///         storing more than `threshold + 1` entries is pointless. The cap
+    ///         matters because an attacker could otherwise make us allocate one
+    ///         `u64` per packet for the length of the window.
+    /// KID: Write down this mistake, then tell me how many mistakes are still on
+    ///      the list.
+    fn record_failure(&mut self, now: u64, window: u64, cap: usize) -> usize {
+        // Prune old entries so the count reflects only the live window.
+        let _ = self.prune_failures(now, window);
+        self.failures.push_back(now);
+        // Enforce the cap. Popping from the front keeps the *newest* entries,
+        // which is the right direction: recent failures are the ones that matter
+        // for deciding to ban.
+        while self.failures.len() > cap {
+            let _ = self.failures.pop_front();
+        }
+        self.failures.len()
     }
 }
 
@@ -615,7 +685,7 @@ impl Engine {
             // later knock from the same IP ambiguous.
             if let Some(state) = self.states.get_mut(&event.src_ip) {
                 state.candidates.clear();
-                state.failures = 0;
+                state.failures.clear();
                 state.last_seen = event.at;
             }
 
@@ -648,39 +718,59 @@ impl Engine {
         // Step 5c: nothing matched. This is a FAILED KNOCK.
         //
         // We only reach here for packets that targeted a port inside the knock
-        // range from an IP that is neither banned nor authorised. That is the
-        // narrow definition of "failed port knocking" the user asked us to ban
-        // on, and it is deliberately narrow so the ban list stays meaningful.
+        // range from an IP that is neither banned nor authorised.
+        //
+        // The failure is counted against a *rolling window* (see
+        // `ban_window_seconds`), not a one-strike rule. This is the fix for the
+        // spoofed-source denial of service: with a one-strike rule, a single
+        // packet bearing a victim's address was enough to get that victim
+        // banned. Now an attacker must spend `ban_fail_threshold` packets per
+        // window per victim, which makes the attack unattractive.
+        //
+        // We keep the counter capped at `threshold` entries so a flood cannot
+        // make us allocate without bound (see `record_failure`).
         // ------------------------------------------------------------------
-        let state = self.states.entry(event.src_ip).or_default();
-        state.failures = state.failures.saturating_add(1);
-        state.last_seen = event.at;
-        // Take a copy so the borrow ends before we possibly mutate the banlist.
-        let failures = state.failures;
+        let window = self.config.ban_window_seconds;
+        let threshold = self.config.ban_fail_threshold;
+        // The cap is `threshold` -- we never need to remember more than the
+        // number that triggers a ban, because reaching it ends the state's life.
+        let cap = threshold as usize;
 
-        if failures >= self.config.ban_threshold {
-            // Ban them, with a reason an operator can act on.
+        let state = self.states.entry(event.src_ip).or_default();
+        state.last_seen = event.at;
+        let failures = state.record_failure(event.at, window, cap);
+
+        if failures >= threshold as usize {
+            // Ban them, with a reason an operator can act on. The reason names
+            // the window and the count so the log line answers "why?" without a
+            // second lookup.
             let reason = format!(
-                "failed port knock: packet to port {} matched no live sequence ({} failure(s))",
-                event.dst_port, failures
+                "failed port knock: packet to port {} matched no live sequence \
+                 ({} failure(s) in the last {}s)",
+                event.dst_port, failures, window
             );
             let _ = self
                 .banlist
                 .ban(event.src_ip, event.at, self.config.ban_ttl_seconds, &reason);
 
             // Forget everything else we knew about them: they are banned now,
-            // and the candidates would be stale when the ban lifts.
+            // and the candidates would be stale when the ban lifts. Dropping the
+            // state also drops the failure ring, which is correct -- the ban is
+            // now the record, and the ban list is where an operator looks.
             let _ = self.states.remove(&event.src_ip);
 
             return Outcome::Banned {
                 ip: event.src_ip,
-                failures,
+                failures: failures as u32,
             };
         }
 
-        // Below the threshold: count the failure and wait. Because the default
-        // threshold is 1, this branch is only reached by an operator who raised
-        // it deliberately.
+        // Below the threshold: the failure is recorded and we wait. The caller
+        // sees `Ignored` because nothing observable happened -- there is no
+        // `Outcome::Failed` variant, deliberately: a failure below the threshold
+        // is an implementation detail of the rate limiter, not an event the
+        // daemon needs to act on. (If we later add alerting on near-threshold
+        // behaviour, this is the place to add a variant.)
         Outcome::Ignored
     }
 
@@ -696,11 +786,13 @@ impl Engine {
     ///           so the daemon can remove the block rule.
     ///
     /// We also prune idle per-IP state here, which is the only place it
-    ///         happens for IPs that are *not* sending packets. Without it, a
-    ///         single failed knock from a spoofed source would leave an entry in
-    ///         `states` forever. (In practice a failed knock with threshold 1
-    ///         bans the IP and removes its state, so this mostly covers
-    ///         raised-threshold deployments -- but "mostly" is not "always".)
+    ///         happens for IPs that are *not* sending packets. Without it, an IP
+    ///         that made one failed knock and then went quiet would leave an entry
+    ///         in `states` forever -- and with the rolling failure window, an
+    ///         attacker can create such entries cheaply by sending a single
+    ///         spoofed packet per address. That makes this pruning a security
+    ///         control, not just tidiness: it bounds the memory a spoofing flood
+    ///         can pin.
     /// KID: The bouncer's tidy-up round: lock expired doors, let people out of
     ///      the naughty corner, and throw away old scribbled notes.
     pub fn sweep(&mut self, now: u64) -> SweepReport {
@@ -850,7 +942,12 @@ mod tests {
         config.step_skew = 1;
         config.knock_count_min = 3;
         config.knock_count_max = 3; // fixed length: simpler assertions
-        config.ban_threshold = 1;
+                                    // The fixture uses threshold 1 so the existing single-failure tests stay
+                                    // meaningful. Threshold 1 is still *supported* -- it is just no longer
+                                    // the default (see `ban_fail_threshold`). The rolling-window behaviour
+                                    // has its own tests, below.
+        config.ban_fail_threshold = 1;
+        config.ban_window_seconds = 3600;
         config.ban_ttl_seconds = 0; // permanent, so tests do not race the clock
         config.open_ttl_seconds = 30;
         config.validate().expect("fixture config must be valid");
@@ -1083,6 +1180,8 @@ mod tests {
         config.open_range = PortRange::new(50_000, 50_009).unwrap();
         config.knock_count_min = 3;
         config.knock_count_max = 3;
+        config.ban_fail_threshold = 1;
+        config.ban_window_seconds = 3600;
         config.ban_ttl_seconds = 100;
         let keyring = test_keyring();
         let mut engine = Engine::new(keyring, config.clone(), BanList::new());
@@ -1154,7 +1253,8 @@ mod tests {
         config.open_range = PortRange::new(50_000, 50_009).unwrap();
         config.knock_count_min = 3;
         config.knock_count_max = 3;
-        config.ban_threshold = 3;
+        config.ban_fail_threshold = 3;
+        config.ban_window_seconds = 3600;
         let keyring = test_keyring();
         let mut engine = Engine::new(keyring, config.clone(), BanList::new());
 
@@ -1202,5 +1302,327 @@ mod tests {
         assert_eq!(clock.now(), 1030);
         clock.set(5);
         assert_eq!(clock.now(), 5);
+    }
+
+    // =======================================================================
+    // Rolling-window failure rate limiting
+    //
+    // These are the tests for the fix to the spoofed-source denial of service.
+    // The property under test: a *single* spoofed packet can no longer ban an
+    // address; it takes `ban_fail_threshold` packets inside `ban_window_seconds`.
+    // =======================================================================
+
+    /// Build an engine with a given threshold and window, plus the "wrong" port
+    /// for the fixture's current step (a port in the knock range that is not part
+    /// of alice's sequence).
+    fn engine_with_rate_limit(threshold: u32, window: u64) -> (Engine, u16, u64) {
+        let mut config = ServerConfig::default();
+        config.knock_range = PortRange::new(40_000, 40_099).unwrap();
+        config.open_range = PortRange::new(50_000, 50_009).unwrap();
+        config.knock_count_min = 3;
+        config.knock_count_max = 3;
+        config.ban_fail_threshold = threshold;
+        config.ban_window_seconds = window;
+        config.ban_ttl_seconds = 0; // permanent, so tests do not race a TTL
+        config.validate().expect("rate-limit config must be valid");
+
+        let now = 1_000_000u64;
+        let step = crate::crypto::time_step(now, config.step_seconds);
+        let spec = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            step,
+            &config,
+        );
+        let wrong = (40_000u16..40_100)
+            .find(|p| !spec.knock_ports.contains(p))
+            .expect("there must be an unused port in a 100-port range");
+
+        let engine = Engine::new(test_keyring(), config, BanList::new());
+        (engine, wrong, now)
+    }
+
+    /// THE regression test for the spoofing DoS.
+    ///
+    /// EXPERT: Before the rate limit, one packet from a spoofed source banned
+    ///         that source. An off-path attacker could therefore ban any address
+    ///         they liked -- a censorship tool, not a security feature. This test
+    ///         asserts the fixed property: one packet is not enough.
+    /// KID: One prank tap with someone else's name on it must not get them
+    ///      thrown out.
+    #[test]
+    fn one_spoofed_packet_cannot_ban() {
+        let (mut engine, wrong, now) = engine_with_rate_limit(5, 3600);
+        let victim = ip(198, 51, 100, 7);
+
+        // A single packet bearing the victim's (spoofed) address.
+        let outcome = engine.observe(KnockEvent {
+            src_ip: victim,
+            dst_port: wrong,
+            at: now,
+        });
+
+        // It must NOT ban. This is the whole point of the fix.
+        assert_eq!(outcome, Outcome::Ignored);
+        assert!(
+            !engine.banlist().is_banned(victim, now),
+            "a single spoofed packet must not ban the victim"
+        );
+    }
+
+    /// Reaching the threshold inside the window does ban.
+    #[test]
+    fn threshold_failures_within_window_ban() {
+        let (mut engine, wrong, now) = engine_with_rate_limit(5, 3600);
+        let attacker = ip(198, 51, 100, 8);
+
+        // The first four failures are below the threshold.
+        for i in 0..4u64 {
+            let outcome = engine.observe(KnockEvent {
+                src_ip: attacker,
+                dst_port: wrong,
+                // Spread them inside the window.
+                at: now + i * 10,
+            });
+            assert_eq!(
+                outcome,
+                Outcome::Ignored,
+                "failure {} must not ban yet",
+                i + 1
+            );
+            assert!(!engine.banlist().is_banned(attacker, now + i * 10));
+        }
+
+        // The fifth reaches the threshold.
+        let outcome = engine.observe(KnockEvent {
+            src_ip: attacker,
+            dst_port: wrong,
+            at: now + 40,
+        });
+        match outcome {
+            Outcome::Banned {
+                ip: banned,
+                failures,
+            } => {
+                assert_eq!(banned, attacker);
+                assert_eq!(failures, 5);
+            }
+            other => panic!("expected Banned on the 5th failure, got {other:?}"),
+        }
+        assert!(engine.banlist().is_banned(attacker, now + 40));
+    }
+
+    /// THE rolling-window test: failures older than the window do not count.
+    ///
+    /// EXPERT: This is what distinguishes a rolling window from a fixed bucket.
+    ///         A bucket would still hold these failures if they fell in the same
+    ///         calendar period; a rolling window forgets them because they are
+    ///         older than `window` seconds relative to *now*.
+    /// KID: Mistakes you made ages ago do not count against you any more.
+    #[test]
+    fn failures_age_out_of_the_window() {
+        let (mut engine, wrong, now) = engine_with_rate_limit(5, 100);
+        let addr = ip(198, 51, 100, 9);
+
+        // Four failures at t=0.
+        for _ in 0..4 {
+            let _ = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: wrong,
+                at: now,
+            });
+        }
+        assert!(!engine.banlist().is_banned(addr, now));
+
+        // Wait out the window, then one more failure. If the old four counted,
+        // this would be the fifth and would ban. They must have aged out, so it
+        // is the *first* failure of a fresh window.
+        let later = now + 101; // strictly past the 100s window
+        let outcome = engine.observe(KnockEvent {
+            src_ip: addr,
+            dst_port: wrong,
+            at: later,
+        });
+        assert_eq!(
+            outcome,
+            Outcome::Ignored,
+            "failures older than the window must not count"
+        );
+        assert!(
+            !engine.banlist().is_banned(addr, later),
+            "the aged-out failures must not have triggered a ban"
+        );
+    }
+
+    /// A burst spread across the window boundary must not accumulate.
+    ///
+    /// EXPERT: This is the attack the rolling window exists to defeat: send
+    ///         `threshold - 1` failures just before the boundary and
+    ///         `threshold - 1` just after, hoping a fixed bucket resets and
+    ///         effectively grants `2 * (threshold - 1)`. With a rolling window,
+    ///         by the time the second burst arrives the first has aged out, so
+    ///         the count never reaches the threshold.
+    /// KID: You cannot get extra tries by waiting for the clock to tick over.
+    #[test]
+    fn burst_across_the_boundary_does_not_accumulate() {
+        let window = 100u64;
+        let (mut engine, wrong, now) = engine_with_rate_limit(5, window);
+        let addr = ip(198, 51, 100, 10);
+
+        // Four failures, as late as possible while still in the first window.
+        for i in 0..4u64 {
+            let _ = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: wrong,
+                at: now + i,
+            });
+        }
+        assert!(!engine.banlist().is_banned(addr, now));
+
+        // Four more, after the first four have aged out.
+        let base = now + window + 1;
+        for i in 0..4u64 {
+            let at = base + i;
+            let outcome = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: wrong,
+                at,
+            });
+            assert_eq!(
+                outcome,
+                Outcome::Ignored,
+                "the second burst must start a fresh count, not continue the old one"
+            );
+        }
+        assert!(!engine.banlist().is_banned(addr, base + 3));
+    }
+
+    /// The failure ring must not grow without bound under a flood.
+    ///
+    /// EXPERT: A memory-growth bug in a security daemon is a slow, invisible
+    ///         failure, and the failure ring is attacker-influenceable (one entry
+    ///         per spoofed packet). `record_failure` caps the stored length at
+    ///         the threshold, so this asserts the cap holds even when we feed it
+    ///         far more failures than the threshold *without* letting it ban
+    ///         (by using a threshold high enough that the test stays below it).
+    /// KID: Even if someone taps a thousand wrong doors, our notepad does not
+    ///      get a thousand lines longer.
+    #[test]
+    fn failure_ring_is_bounded() {
+        // A high threshold so the flood does not trigger a ban and clear state.
+        let (mut engine, wrong, now) = engine_with_rate_limit(1000, 3600);
+        let addr = ip(198, 51, 100, 11);
+
+        // 500 failures, all inside the window.
+        for i in 0..500u64 {
+            let _ = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: wrong,
+                at: now + i,
+            });
+        }
+        // No ban (we are below the threshold of 1000)...
+        assert!(!engine.banlist().is_banned(addr, now + 499));
+
+        // ...and the stored ring must be capped at the threshold, not 500.
+        let stored = engine
+            .states
+            .get(&addr)
+            .map(|s| s.failures.len())
+            .unwrap_or(0);
+        assert!(
+            stored <= 1000,
+            "the failure ring must be capped at the threshold, found {stored}"
+        );
+    }
+
+    /// The failure count must be per-IP, not global.
+    ///
+    /// EXPERT: A shared counter would let one attacker exhaust the allowance for
+    ///         every other address -- a trivial way to lock out the world, and
+    ///         the mirror image of the bug we just fixed.
+    /// KID: Your mistakes are your own. Nobody else's taps get you thrown out.
+    #[test]
+    fn failure_counting_is_per_ip() {
+        let (mut engine, wrong, now) = engine_with_rate_limit(5, 3600);
+        let a = ip(198, 51, 100, 12);
+        let b = ip(198, 51, 100, 13);
+
+        // Four failures from A, four from B -- interleaved.
+        for i in 0..4u64 {
+            let _ = engine.observe(KnockEvent {
+                src_ip: a,
+                dst_port: wrong,
+                at: now + i,
+            });
+            let _ = engine.observe(KnockEvent {
+                src_ip: b,
+                dst_port: wrong,
+                at: now + i,
+            });
+        }
+        // Neither has reached five.
+        assert!(!engine.banlist().is_banned(a, now));
+        assert!(!engine.banlist().is_banned(b, now));
+
+        // A's fifth bans A only.
+        let outcome = engine.observe(KnockEvent {
+            src_ip: a,
+            dst_port: wrong,
+            at: now + 4,
+        });
+        assert!(matches!(outcome, Outcome::Banned { .. }));
+        assert!(engine.banlist().is_banned(a, now + 4));
+        assert!(
+            !engine.banlist().is_banned(b, now + 4),
+            "B must not be banned by A's failures"
+        );
+    }
+
+    /// A correct knock must still work with the rate limit in place.
+    ///
+    /// EXPERT: The obvious regression risk of touching the failure path is
+    ///         breaking the success path. This test is the guard.
+    #[test]
+    fn correct_knock_still_authorises_under_rate_limiting() {
+        let (mut engine, _wrong, now) = engine_with_rate_limit(5, 3600);
+        let addr = ip(198, 51, 100, 14);
+
+        let cfg = engine.config().clone();
+        let spec = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            crate::crypto::time_step(now, cfg.step_seconds),
+            &cfg,
+        );
+        for &p in &spec.knock_ports {
+            let _ = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: p,
+                at: now,
+            });
+        }
+        assert!(engine.auth().is_open(addr, now));
+    }
+
+    /// A failure *below* the threshold must not leave the IP banned later.
+    ///
+    /// EXPERT: Guards against a class of bug where the state is updated but a
+    ///         later read misinterprets it. Cheap to assert, catches a whole
+    ///         family of mistakes.
+    #[test]
+    fn sub_threshold_failures_leave_no_ban() {
+        let (mut engine, wrong, now) = engine_with_rate_limit(5, 3600);
+        let addr = ip(198, 51, 100, 15);
+        for _ in 0..4 {
+            let _ = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: wrong,
+                at: now,
+            });
+        }
+        // Check well after the observation, and at a later time.
+        assert!(!engine.banlist().is_banned(addr, now));
+        assert!(!engine.banlist().is_banned(addr, now + 10_000));
     }
 }

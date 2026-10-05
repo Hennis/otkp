@@ -263,20 +263,54 @@ pub struct ServerConfig {
     /// Maximum number of knocks in a sequence.
     pub knock_count_max: u8,
 
-    /// How many *wrong* knocks before we ban the source IP.
+    /// How many *wrong* knocks, **within a rolling window**, before we ban.
     ///
-    /// EXPERT: The user explicitly asked for "ban on first failure", so the
-    ///         default is `1`. It is a `u32` rather than `u8` so an operator can
-    ///         set a large threshold for a noisy environment without overflow
-    ///         anxiety. See the README's operational warning about this default.
-    /// KID: How many mistakes you get. The boss said one mistake only.
-    pub ban_threshold: u32,
+    /// EXPERT: This is a *rate limit*, not a one-strike rule, and the change is a
+    ///         security fix rather than a tuning preference. With the old
+    ///         `ban_threshold = 1` (ban on the first failure), an off-path
+    ///         attacker could ban an arbitrary address by sending a single packet
+    ///         with a spoofed source -- a trivial denial of service against any
+    ///         address they chose. Requiring N failures inside
+    ///         [`Self::ban_window_seconds`] raises the cost from one packet to N
+    ///         packets per window per victim, which makes the attack unattractive.
+    ///
+    /// It does NOT eliminate spoofing (see the README roadmap): the
+    ///         remaining fix is to only count a failure after the source has made
+    ///         some correct progress, or after a MAC-valid attempt has failed.
+    ///
+    /// Why a `u32`: an operator may want a generous limit for a noisy
+    ///         environment, and `u32` removes any overflow anxiety.
+    /// KID: How many wrong taps you get in one hour before the guard throws you
+    ///      out. Not "one mistake and you are gone" -- that would let a prankster
+    ///      get you thrown out by tapping a wrong door once while pretending to
+    ///      be you.
+    pub ban_fail_threshold: u32,
+
+    /// The length of the rolling failure window, in seconds.
+    ///
+    /// EXPERT: A *rolling* window, not a fixed bucket. With a fixed bucket (say
+    ///         "failures since the top of the hour"), an attacker simply waits
+    ///         for the boundary and gets a fresh allowance; worse, the allowance
+    ///         resets on a schedule they can predict. A rolling window means the
+    ///         count is "failures in the last N seconds", so bursts cannot be
+    ///         timed around a reset. Implementation: a small ring of recent
+    ///         failure timestamps per IP, pruned on every observation.
+    ///
+    /// Default 3600 (one hour), matching the agreed policy.
+    /// KID: How far back we look when counting your mistakes: the last hour,
+    ///      sliding along with the clock.
+    pub ban_window_seconds: u64,
 
     /// How long a ban lasts, in seconds. `0` means forever.
     ///
     /// EXPERT: `0`-as-forever is a common Unix idiom (`O_NONBLOCK` excepted).
     ///         We document it loudly because "I set the timeout to 0 and it
     ///         banned my office forever" is a support ticket waiting to happen.
+    ///
+    /// Note the interaction with `ban_window_seconds`: the window decides
+    ///         how failures *accumulate*, and this decides how long the
+    ///         consequence *lasts*. They are independent knobs and are
+    ///         deliberately not derived from each other.
     /// KID: How long you sit in the naughty corner. Zero means "forever".
     pub ban_ttl_seconds: u64,
 
@@ -331,7 +365,10 @@ impl Default for ServerConfig {
             step_skew: 1,
             knock_count_min: 3,
             knock_count_max: 5,
-            ban_threshold: 1,
+            // Five failures inside one hour -> a one-hour ban. See the field
+            // docs for why this replaced "ban on the first failure".
+            ban_fail_threshold: 5,
+            ban_window_seconds: 3600,
             ban_ttl_seconds: 3600,
             open_ttl_seconds: 30,
             inter_knock_delay_ms: 80,
@@ -383,9 +420,14 @@ impl ServerConfig {
                 "step_skew above 10 would accept sequences from up to 11 windows in each direction; that is a policy decision, not a default",
             ));
         }
-        if self.ban_threshold == 0 {
+        if self.ban_fail_threshold == 0 {
             return Err(OtkpError::config(
-                "ban_threshold must be at least 1 (0 would mean 'never ban')",
+                "ban_fail_threshold must be at least 1 (0 would mean 'never ban')",
+            ));
+        }
+        if self.ban_window_seconds == 0 {
+            return Err(OtkpError::config(
+                "ban_window_seconds must be at least 1 (a zero-length window could never accumulate failures)",
             ));
         }
         if self.open_ttl_seconds == 0 {

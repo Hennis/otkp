@@ -128,8 +128,10 @@ pub struct Options {
     pub source: Option<String>,
     /// Seconds per time window (overrides the config file).
     pub step_seconds: Option<u64>,
-    /// Failures before a ban (overrides the config file).
-    pub ban_threshold: Option<u32>,
+    /// Failures inside the rolling window before a ban (overrides the config).
+    pub ban_fail_threshold: Option<u32>,
+    /// Length of the rolling failure window, in seconds.
+    pub ban_window_seconds: Option<u64>,
     /// Seconds an opened port stays open.
     pub open_ttl: Option<u64>,
     /// Seconds a ban lasts (0 = permanent).
@@ -168,7 +170,8 @@ impl Default for Options {
             firewall: None,
             source: None,
             step_seconds: None,
-            ban_threshold: None,
+            ban_fail_threshold: None,
+            ban_window_seconds: None,
             open_ttl: None,
             ban_ttl: None,
             inter_knock_delay_ms: None,
@@ -355,7 +358,7 @@ where
 ///         same three characters" heuristic rather than a full edit-distance
 ///         implementation) turns a frustrating error into a helpful one. The
 ///         cost is a dozen lines; the benefit is that a typo like
-///         `--ban-treshold` points straight at `--ban-threshold`.
+///         `--ban-fail-treshold` points straight at `--ban-fail-threshold`.
 /// KID: "I do not know that word -- did you mean this one?"
 fn unknown_flag(flag: &str) -> OtkpError {
     // The complete set of flags we know, for suggestion purposes.
@@ -370,7 +373,8 @@ fn unknown_flag(flag: &str) -> OtkpError {
         "--firewall",
         "--source",
         "--step-seconds",
-        "--ban-threshold",
+        "--ban-fail-threshold",
+        "--ban-window",
         "--open-ttl",
         "--ban-ttl",
         "--inter-knock-delay-ms",
@@ -418,7 +422,8 @@ fn is_known_value_flag(flag: &str) -> bool {
             | "--firewall"
             | "--source"
             | "--step-seconds"
-            | "--ban-threshold"
+            | "--ban-fail-threshold"
+            | "--ban-window"
             | "--open-ttl"
             | "--ban-ttl"
             | "--inter-knock-delay-ms"
@@ -466,7 +471,8 @@ fn apply_flag_value(options: &mut Options, flag: &str, value: &str) -> Result<()
         "--firewall" => options.firewall = Some(value.to_string()),
         "--source" => options.source = Some(value.to_string()),
         "--step-seconds" => options.step_seconds = Some(parse_u64(flag, value)?),
-        "--ban-threshold" => options.ban_threshold = Some(parse_u32(flag, value)?),
+        "--ban-fail-threshold" => options.ban_fail_threshold = Some(parse_u32(flag, value)?),
+        "--ban-window" => options.ban_window_seconds = Some(parse_u64(flag, value)?),
         "--open-ttl" => options.open_ttl = Some(parse_u64(flag, value)?),
         "--ban-ttl" => options.ban_ttl = Some(parse_u64(flag, value)?),
         "--inter-knock-delay-ms" => options.inter_knock_delay_ms = Some(parse_u64(flag, value)?),
@@ -591,6 +597,7 @@ pub fn print_help() {
             "            Create a new user and print their secret ONCE.\n",
             "\n",
             "  serve     [--dir DIR] [--firewall MODE] [--source MODE]\n",
+            "            [--ban-fail-threshold N] [--ban-window SECS]\n",
             "            Run the daemon. Firewall modes: dry-run (default),\n",
             "            iptables, nftables, command. Sources: udp (default), raw.\n",
             "\n",
@@ -734,8 +741,10 @@ mod tests {
             "iptables",
             "--source",
             "raw",
-            "--ban-threshold",
+            "--ban-fail-threshold",
             "3",
+            "--ban-window",
+            "600",
             "--open-ttl",
             "60",
             "--ban-ttl",
@@ -745,7 +754,8 @@ mod tests {
         assert_eq!(p.command, Command::Serve);
         assert_eq!(p.options.firewall.as_deref(), Some("iptables"));
         assert_eq!(p.options.source.as_deref(), Some("raw"));
-        assert_eq!(p.options.ban_threshold, Some(3));
+        assert_eq!(p.options.ban_fail_threshold, Some(3));
+        assert_eq!(p.options.ban_window_seconds, Some(600));
         assert_eq!(p.options.open_ttl, Some(60));
         assert_eq!(p.options.ban_ttl, Some(0));
     }
@@ -766,11 +776,11 @@ mod tests {
 
     #[test]
     fn unknown_flag_suggests_a_close_match() {
-        let err = parse_str(&["serve", "--ban-treshold", "3"]).unwrap_err();
+        let err = parse_str(&["serve", "--ban-fail-treshold", "3"]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown flag"));
         // The suggestion should point at the real flag name.
-        assert!(msg.contains("--ban-threshold"), "got: {msg}");
+        assert!(msg.contains("--ban-fail-threshold"), "got: {msg}");
     }
 
     #[test]

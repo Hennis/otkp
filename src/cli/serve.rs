@@ -232,9 +232,13 @@ fn apply_overrides(config: &mut ServerConfig, options: &Options) -> Result<()> {
         crate::log_info!("override: step_seconds = {secs}");
         config.step_seconds = secs;
     }
-    if let Some(n) = options.ban_threshold {
-        crate::log_info!("override: ban_threshold = {n}");
-        config.ban_threshold = n;
+    if let Some(n) = options.ban_fail_threshold {
+        crate::log_info!("override: ban_fail_threshold = {n}");
+        config.ban_fail_threshold = n;
+    }
+    if let Some(secs) = options.ban_window_seconds {
+        crate::log_info!("override: ban_window_seconds = {secs}");
+        config.ban_window_seconds = secs;
     }
     if let Some(secs) = options.open_ttl {
         crate::log_info!("override: open_ttl_seconds = {secs}");
@@ -328,7 +332,8 @@ mod tests {
         let mut cfg = ServerConfig::default();
         let mut o = Options::default();
         o.step_seconds = Some(15);
-        o.ban_threshold = Some(5);
+        o.ban_fail_threshold = Some(5);
+        o.ban_window_seconds = Some(600);
         o.open_ttl = Some(60);
         o.ban_ttl = Some(0);
         o.inter_knock_delay_ms = Some(10);
@@ -336,7 +341,8 @@ mod tests {
 
         apply_overrides(&mut cfg, &o).unwrap();
         assert_eq!(cfg.step_seconds, 15);
-        assert_eq!(cfg.ban_threshold, 5);
+        assert_eq!(cfg.ban_fail_threshold, 5);
+        assert_eq!(cfg.ban_window_seconds, 600);
         assert_eq!(cfg.open_ttl_seconds, 60);
         assert_eq!(cfg.ban_ttl_seconds, 0);
         assert_eq!(cfg.inter_knock_delay_ms, 10);

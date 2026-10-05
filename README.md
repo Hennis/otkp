@@ -229,7 +229,8 @@ Useful flags:
 | `--source udp\|raw` | `serve` | How knocks are observed (see §7) |
 | `--step-offset -1\|0\|1` | `knock` | Try the previous/next time step if your clock is off |
 | `--mode udp\|raw` | `knock` | How knocks are *sent* (must match the server's `--source`) |
-| `--ban-threshold N` | `serve` | Failures before a ban (default `1`, i.e. ban on first failure) |
+| `--ban-fail-threshold N` | `serve` | Failures **inside the rolling window** before a ban (default `5`) |
+| `--ban-window SECS` | `serve` | Length of the rolling failure window (default `3600`) |
 | `--open-ttl SECS` | `serve` | How long an opened port stays open |
 | `--ban-ttl SECS` | `serve` | `0` = permanent ban |
 
@@ -266,11 +267,19 @@ trait: the interesting logic is written once and tested once.
 
 **What you must know before trusting it**
 
-- **`ban_threshold = 1` is deliberately aggressive.** Any packet to a knock-range
-  port that doesn't fit a live sequence bans that IP. On a busy host, innocent
-  scanners will populate the ban list. Keep `--ban-ttl` finite, or whitelist your
-  management IPs, or raise the threshold. This is a real operational trade-off,
-  not a bug.
+- **The ban is a rolling-window rate limit** (default: 5 failures per IP per
+  hour), not a one-strike rule. Earlier versions banned on the first failure,
+  which let an off-path attacker ban an arbitrary address with a single spoofed
+  packet — a denial of service against any address they chose. Requiring N
+  failures inside a rolling window raises that cost from one packet to N packets
+  per window per victim.
+  - **The residual is not eliminated.** N packets per hour per victim is still
+    cheap for a determined attacker with a fast link. The remaining fix is to
+    only count a failure once the source has made some correct progress, or once
+    a MAC-valid attempt has failed (see §10). Until then, treat a ban as a
+    rate-limit signal, not as proof of an attacker.
+  - The window is *rolling*, not a fixed bucket, so bursts cannot be timed around
+    a reset.
 - **The client and server clocks must agree** to within ±1 time step. Use NTP.
 - **The knock sequence is low-entropy.** Ports are drawn from the configured
   range, so an attacker who can observe the wire can replay *within the same
@@ -336,19 +345,15 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
 
 ### Security gaps, in priority order
 
-- [ ] **Replace the hard ban with a rate limit (critical).** `ban_threshold = 1`
-  currently lets an off-path attacker ban an arbitrary address with a single
-  spoofed packet. Agreed fix: **N failures per IP per rolling hour** (default
-  5) → temporary ban, instead of "one failure → permanent-ish ban".
-  - This raises the spoofing DoS from *one packet* to *N packets per hour per
-    victim*, which makes it unattractive but does not eliminate it. The residual
-    is closed by only counting a failure once the source has made some correct
-    progress, or once a MAC-valid attempt has failed. Do both if the budget
-    allows; the rate limit alone is a large improvement.
-  - Implementation note: a rolling window, not a fixed bucket, or an attacker
-    times bursts across the boundary. A small ring of recent failure timestamps
-    per IP is enough, and it fits the existing lazy-expiry tables.
-  - Keep the failure counters in the per-IP state that `sweep` already prunes.
+- [x] **Replaced the hard ban with a rolling-window rate limit.** Done in
+  `ban_fail_threshold` + `ban_window_seconds` (default 5 failures per IP per
+  hour). `ban_threshold = 1` used to let an off-path attacker ban an arbitrary
+  address with a single spoofed packet; that now costs N packets per window per
+  victim.
+  - **Residual, not yet closed:** N packets per hour is still cheap for a
+    determined attacker. Close it by only counting a failure once the source has
+    made some correct progress, or once a MAC-valid attempt has failed. The
+    rolling window raises the cost; it does not remove the attack.
 - [ ] **Bind the sequence to the source address (high).** Include `src_ip` in the
   HMAC input, so a replay from a different address derives a different sequence
   and matches nothing. This defeats both passive replay *and* the active race

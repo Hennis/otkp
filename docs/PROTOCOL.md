@@ -154,12 +154,21 @@ On every observed packet `(src_ip, dst_port)`:
 6. If exactly one sequence completed -> authorise `src_ip` for `open_port`, open
    it in the firewall for `open_ttl_seconds`, clear that IP's candidates, done.
 7. Else if at least one candidate advanced -> log progress, wait for more packets.
-8. Else (nothing matched) -> `failures += 1`; if `failures >= ban_threshold`,
-   ban `src_ip` and clear its state.
+8. Else (nothing matched) -> record the failure time; let
+   `failures_in_window` be the number of recorded failures no older than
+   `ban_window_seconds`. If `failures_in_window >= ban_fail_threshold`, ban
+   `src_ip` and clear its state.
+
+   The window is *rolling*: the count is always "failures in the last
+   `ban_window_seconds` seconds", so an attacker cannot time bursts around a
+   periodic reset. Failures older than the window are forgotten, which is what
+   distinguishes this from a fixed-bucket counter.
 
 EXPERT: Step 1 is the load-bearing one. Without it, step 8 would ban any host
-that ever scanned a port, and -- worse -- an attacker could get *your* address
-banned by sending one spoofed packet to a knock-range port.
+that ever scanned a port. Step 8's rate limit is the second load-bearing one:
+with a one-strike rule, an attacker could get *your* address banned by sending a
+single spoofed packet to a knock-range port. N failures per rolling window makes
+that attack expensive, though not yet impossible (see the README roadmap).
 KID: If you tap the wrong number of times, the guard crosses your name off the
 guest list before you get a second try. But he only listens to taps on the secret
 doors, not to people knocking on the front door for normal reasons.
