@@ -1,0 +1,23 @@
+# ============================================================================
+#  rustfmt.toml  --  formatting rules for `cargo fmt`
+# ============================================================================
+#
+#  EXPERT: rustfmt's defaults are good, and deviating from them is a cost: every
+#          reader who knows the defaults has to re-learn your house style, and
+#          tooling assumptions (line numbers in diffs, editor integration) get
+#          subtly worse. So we keep almost everything default and set only
+#          `max_width`.
+#
+#          Why 100 and not the default 100? It IS the default -- but we state it
+#          explicitly so the choice is visible and reviewable rather than implied
+#          by an absent setting. An explicit value that matches the default is
+#          documentation, not configuration.
+#
+#  KID: A note saying "fold the code neatly at 100 letters per line".
+# ============================================================================
+
+# The maximum line width before rustfmt wraps.
+max_width = 100
+
+# Use the 2021 edition's formatting rules.
+edition = "2021"

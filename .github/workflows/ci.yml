@@ -1,0 +1,81 @@
+# ============================================================================
+#  .github/workflows/ci.yml  --  continuous integration
+# ============================================================================
+#
+#  EXPERT: CI exists to make "it works on my machine" impossible to say with a
+#          straight face. For this project the checks that matter are, in order:
+#
+#            1. `cargo test`   -- the 200-odd unit, integration and doctests.
+#            2. `cargo clippy` -- we keep the tree lint-clean, so a new warning
+#                                 is a regression and CI should say so.
+#            3. `cargo fmt --check` -- formatting is not a matter of taste in a
+#                                 shared repo; if rustfmt would change it, fail.
+#            4. `cargo build --release` -- proves the release profile (LTO,
+#                                 codegen-units=1, panic=abort, strip) compiles.
+#
+#          We pin to a stable toolchain and run on Ubuntu because the `raw`
+#          knock source is Linux-only. (The crate compiles elsewhere, but the
+#          tests that exercise AF_PACKET do not, so a Linux runner is the honest
+#          target.)
+#
+#  KID: A robot that checks our homework every time we hand it in.
+# ============================================================================
+
+name: CI
+
+# When to run: on every push to the default branch and on every pull request.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A workflow is a list of jobs. We have one job with several steps, because the
+# steps share a build cache and splitting them would mean compiling four times.
+jobs:
+  test:
+    name: build, lint and test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository.
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      # Install a stable Rust toolchain, with the components CI needs.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # `clippy` and `rustfmt` are not installed by default.
+          components: clippy, rustfmt
+
+      # Cache the Cargo registry and the target directory. Without this every
+      # run recompiles all dependencies, which turns a 1-minute job into a
+      # 5-minute one.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # The cache key includes the lock file, so a dependency change
+          # invalidates the cache automatically.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Formatting must be canonical.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # Lints must be clean. `-D warnings` turns any clippy warning into a
+      # failure, which is what keeps the tree clean over time.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The tests. `--all-targets` includes the integration tests in tests/.
+      - name: Test
+        run: cargo test --all-targets
+
+      # A release build, to catch anything that only breaks with LTO or
+      # panic=abort (both of which we enable in Cargo.toml).
+      - name: Release build
+        run: cargo build --release

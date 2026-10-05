@@ -1,0 +1,150 @@
+# ============================================================================
+#  Cargo.toml  --  the "shopping list" and "name tag" for our Rust project
+# ============================================================================
+#
+#  EXPERT VIEW (what a Rust engineer sees):
+#    Cargo is Rust's build tool + package manager. This file is the *manifest*:
+#    it declares the package identity, the compilation targets (a library and a
+#    binary), the exact third-party crates we depend on, and build profiles.
+#    `cargo build` reads this file to resolve, compile and link everything.
+#
+#  KID VIEW (what a 10-year-old sees):
+#    Imagine you are baking a cake. This file is the recipe card's front page:
+#    it says what the cake is called ("otkp"), which bowls and tools we need
+#    ("dependencies"), and what we are going to make with it (a "lib" = the
+#    cake recipe itself, and a "bin" = the finished cake you can eat).
+#
+#  TOML is a "configuration language": `key = value` pairs, grouped under
+#  `[section]` headers. `#` starts a comment, just like in Rust.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# [package] -- WHO we are and WHAT we are building (identity + metadata)
+# ---------------------------------------------------------------------------
+[package]
+# The crate name. It must be unique on crates.io if we ever publish.
+# Rule: lowercase, no spaces, usually hyphens or underscores.
+name = "otkp"
+
+# Semantic version: MAJOR.MINOR.PATCH. Pre-1.0 means "young, API may change".
+version = "0.1.0"
+
+# Which edition of the Rust language rules we opt into.
+# 2021 is the current stable edition; it controls small syntax/semantics rules.
+# KID: it is like picking which "rules of the game" we play by.
+edition = "2021"
+
+# The oldest Rust compiler (rustc) that is allowed to build this crate.
+# Cargo will refuse to build on anything older, which prevents confusing errors.
+rust-version = "1.74"
+
+# One-line human description (shows up in `cargo metadata` and on crates.io).
+description = "One Time Knock Protocol (OTKP): OTP-style, time-based, one-time port-knock sequences that open a per-user port, with instant banning of failed knockers."
+
+# SPDX license expression. `MIT OR Apache-2.0` is the Rust-ecosystem convention.
+license = "MIT OR Apache-2.0"
+
+# Where the docs live. Cargo shows this on crates.io.
+readme = "README.md"
+
+# Search keywords (max 5 on crates.io, each <= 20 chars).
+keywords = ["port-knocking", "otp", "hotp", "firewall", "security"]
+
+# crates.io categories (must be from the official category list).
+categories = ["command-line-utilities", "network-programming"]
+
+# ---------------------------------------------------------------------------
+# [lib] -- the LIBRARY target: the reusable "engine" of the project
+# ---------------------------------------------------------------------------
+# EXPERT: Splitting code into a library + a thin binary is idiomatic Rust.
+#         The library holds all the logic and is unit-testable; the binary is
+#         just a small command-line wrapper. Tests in `tests/` link the library.
+# KID:    The "lib" is the box of LEGO bricks. The "bin" is the little car we
+#         build out of them. We can build many cars from one box of bricks.
+[lib]
+name = "otkp"          # how other code (and our tests) `use otkp::...`
+path = "src/lib.rs"    # the file that acts as the library's front door
+
+# ---------------------------------------------------------------------------
+# [[bin]] -- the BINARY target: the program a user actually runs
+# ---------------------------------------------------------------------------
+# The double brackets `[[bin]]` mean "this is a LIST of binaries"; you may have
+# several. We have exactly one, and we name it `otkp` so the command is `otkp`.
+[[bin]]
+name = "otkp"
+path = "src/main.rs"   # the file that holds `fn main()` -- where the program starts
+
+# ---------------------------------------------------------------------------
+# [dependencies] -- the third-party crates we borrow code from
+# ---------------------------------------------------------------------------
+# EXPERT: Each line is `crate_name = "version_requirement"`. Cargo picks the
+#         newest version that satisfies the requirement and records the exact
+#         choice in Cargo.lock (which we DO commit, because we ship a binary).
+# KID:    These are the tools we borrow from the neighbours' toolbox instead of
+#         inventing them ourselves. Each borrowed tool has a version number so
+#         we always get a tool that fits our hands.
+[dependencies]
+# `libc` gives us the raw operating-system calls (sockets, signals, syscalls).
+# We need it for: (a) the AF_PACKET raw sniffer and (b) the Ctrl-C handler.
+libc = "0.2"
+
+# `hmac` implements HMAC (Hash-based Message Authentication Code) generically.
+# We use HMAC-SHA256 as the keyed pseudo-random function behind the protocol.
+hmac = "0.12"
+
+# `sha2` provides the SHA-256 hash function that `hmac` wraps.
+sha2 = "0.10"
+
+# `sha1` provides SHA-1. We use it ONLY for the HOTP interoperability value that
+# `otkp enroll` prints. RFC 4226 mandates HMAC-SHA1 and every authenticator app
+# (Google Authenticator, Authy, oathtool) speaks it, so matching the RFC exactly
+# is what lets a user verify their secret. The knock protocol itself uses
+# SHA-256 and never touches this.
+# SECURITY NOTE: SHA-1 is broken for collision resistance and must never be used
+# where collisions matter. HMAC-SHA1 is a different construction and is still
+# sound as a keyed MAC, but we keep it narrowly scoped to the RFC-4226
+# compatibility value precisely so its weaknesses cannot leak into our protocol.
+sha1 = "0.10"
+
+# `rand` gives us a cryptographically secure random number generator (OsRng).
+# We use it ONLY to create fresh 256-bit user secrets.
+rand = "0.8"
+
+# `serde` = SERialize/DEserialize. It turns Rust structs <-> text formats.
+# `features = ["derive"]` enables the `#[derive(Serialize, Deserialize)]` macro,
+# so we do not have to hand-write JSON conversion code.
+serde = { version = "1", features = ["derive"] }
+
+# `serde_json` is the concrete JSON backend for serde. Used for config files,
+# the keyring, and the persistent ban list.
+serde_json = "1"
+
+# `zeroize` overwrites secret bytes with zeros as soon as they are dropped,
+# so secrets do not linger in RAM where a core dump could leak them.
+# `features = ["derive"]` lets us write `#[derive(ZeroizeOnDrop)]`.
+zeroize = { version = "1", features = ["derive"] }
+
+# `anyhow` is a convenience error type for *applications* (not libraries).
+# It lets the CLI bubble any error up to main() with `.context("...")` messages
+# instead of writing `match` for every fallible call.
+anyhow = "1"
+
+# ---------------------------------------------------------------------------
+# [dev-dependencies] -- extra crates used ONLY when running tests/benches
+# ---------------------------------------------------------------------------
+# Empty for now; our tests use only the standard library and our own library.
+[dev-dependencies]
+
+# ---------------------------------------------------------------------------
+# [profile.release] -- knobs for `cargo build --release`
+# ---------------------------------------------------------------------------
+# EXPERT: `--release` turns on optimisations. These settings trade a slower
+#         compile for a smaller, faster, harder-to-reverse-engineer binary.
+# KID:    "Release" means "the polished version we give to people", not the
+#         practice one. We spend extra time to make it fast and tidy.
+[profile.release]
+opt-level = 3        # maximum optimisation
+lto = true           # "link time optimisation": optimise across all crates at once
+codegen-units = 1    # one codegen unit -> best optimisation (slower to compile)
+panic = "abort"      # on panic, abort immediately (smaller binary, no unwinding)
+strip = true         # remove symbol names from the binary (smaller, less leaky)

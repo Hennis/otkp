@@ -1,0 +1,25 @@
+# ============================================================================
+#  .gitignore  --  "things git should pretend do not exist"
+# ============================================================================
+#
+#  EXPERT: Git tracks files. Anything matching a pattern in this file is left
+#          untracked, so build junk and local secrets never get committed.
+#  KID:    This is the list of toys we do NOT put in our school bag: the mess
+#          we make while building, and the secret diary only we may read.
+# ============================================================================
+
+# `target/` is where Cargo puts every compiled artefact. It is huge, machine
+# specific, and fully reproducible from source -- never commit it.
+/target
+
+# Backup files some editors leave behind when saving a Rust file.
+**/*.rs.bk
+
+# Local runtime data created while testing the daemon by hand.
+# (Real deployments put this in /etc/otkp, which is outside the repo anyway.)
+/otkp-data/
+
+# NOTE: We deliberately DO commit `Cargo.lock`.
+# For a *binary* crate, the lock file pins exact dependency versions, which is
+# how you get reproducible, auditable builds. (For a *library* you would ignore
+# it, so downstream users can pick their own versions.)
