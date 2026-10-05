@@ -330,12 +330,106 @@ src/
 
 ## 10. Roadmap
 
-- [ ] HMAC-authenticated knock payloads in `udp` mode (kills same-window replay).
+Ordered by what actually closes the largest security gap first, not by what is
+easiest. Items marked **[planned path]** are the agreed design direction; the
+reasoning for each is recorded so a future reader does not have to re-derive it.
+
+### Security gaps, in priority order
+
+- [ ] **Fix the spoofed-source ban (critical).** `ban_threshold = 1` currently
+  lets an off-path attacker ban an arbitrary address by sending one packet with
+  a spoofed source. Fix: require a MAC-valid attempt (or at least some correct
+  progress) before a failure may count toward a ban. *This is the one real flaw
+  in the current design; everything else is hardening.*
+- [ ] **Bind the sequence to the source address (high).** Include `src_ip` in the
+  HMAC input, so a replay from a different address derives a different sequence
+  and matches nothing. This defeats both passive replay *and* the active race
+  (see the burn, below). Cost: breaks NAT and mobility, because the client must
+  know the egress address the server sees. Popeea et al. (2011) list client IP as
+  a sequence input, so this is a correct, known fix rather than a new idea.
+- [ ] **[planned path] Single-use sequences — the "burn" (high).** Once a
+  `(user, time_step)` sequence has authorised anyone, mark it used and never
+  accept it again for the rest of its window. This is the standard replay cache
+  (Kerberos; fwknop tracks SPA digests the same way) and it is purely
+  server-side: no protocol, client or payload change.
+  - Keying the burn per `(user, step, src_ip)` is a trap: it gives *no* replay
+    protection, because an attacker replaying from their own address finds an
+    unburned entry. Burn per `(user, step)` and bind to `src_ip` in the
+    derivation instead — then per-IP burns are safe, because each address has its
+    own sequence anyway and multi-device keeps working.
+  - Costs, all real: in-memory state that a restart forgets; a rollback on
+    firewall failure must *un*-burn or the user is locked out for the window; and
+    one knock per window per user unless combined with the `src_ip` binding.
+  - Note what it does *not* buy: an on-path attacker can inject or drop packets
+    and win the race. The burn narrows replay to "attacker must beat Alice",
+    which is a real narrowing but not replay resistance. The `src_ip` binding is
+    what removes the race.
+- [ ] **[planned path] HMAC-authenticated knock payload (high).** `AF_PACKET`
+  captures the whole frame including the UDP payload, so a `raw`-mode knock *can*
+  carry a MAC. (An earlier note in this file wrongly claimed headers-only; the
+  limitation is a definitional one inherited from `knockd`, not a technical one.
+  This is precisely why fwknop left header-based knocking behind and invented
+  SPA.) Payload: `HMAC(secret, user ‖ step ‖ src_ip ‖ nonce) ‖ nonce`. The
+  `src_ip` binding means a replay from another address fails the MAC outright.
+  Cost: per-user anti-replay memory that must survive restarts, or it desyncs.
+- [ ] **Detection: three alerts (medium).** With the burn and the authorising-IP
+  log in place, the daemon becomes a *sensor*, which is arguably its most
+  valuable property — it is the only component that can tell you an on-path
+  adversary exists.
+  1. Burned sequence reused → an on-path observer is present.
+  2. Same user authorised from two IPs in one window → relay or key compromise.
+  3. Authorised IP outside the user's known set → key compromise or stolen
+     credential.
+  - **A replayed sequence is NOT evidence of key compromise.** An observer
+    captures ports, not the key; HMAC is one-way, so they cannot compute the next
+    window. Key compromise shows up as *fresh* sequences from an unexpected IP,
+    never as a replay. Do not rotate the key in response to alert 1 — that leaves
+    the actual problem (someone reading your traffic) untouched.
+- [ ] **Correlate with the service's own logs (medium).** "Port opened" plus
+  "service authentication failed from that same IP" is a strong forged-knock
+  signal. The daemon cannot see this alone — it opens a hole and its knowledge
+  ends there — so it needs the two log sources joined outside the daemon.
+
+### Features and packaging
+
 - [ ] Multi-port open (open a *set* of services per user).
+- [ ] Key rotation and per-user revocation with a generation counter. (Bounds the
+  blast radius of a leaked key and enables revocation. Note it does **not** help
+  with replay: a replay happens inside one rotation period exactly as it happens
+  inside one time step.)
 - [ ] `--source raw` support for IPv6.
 - [ ] Prometheus metrics endpoint (loopback-only).
-- [ ] Key rotation and per-user revocation with a generation counter.
 - [ ] systemd unit + `CAP_NET_RAW`/`CAP_NET_ADMIN` drop-in hardening.
+- [ ] Fuzzing (`cargo-fuzz`) on `parse_ipv4_dest_port` and the payload codec, plus
+  a MIRI run over the test suite to check the `unsafe` in `net.rs`.
+- [ ] Formal verification: the engine is already a pure function, so Kani could
+  prove authorisation soundness, ban-policy safety and bounded state.
+
+### Documentation
+
+- [ ] An honest comparison against fwknop/SPA, including when *not* to use OTKP.
+  A portfolio artifact that knows its own replacement reads as senior.
+
+---
+
+## 11. What this does and does not protect against
+
+Stated plainly, because a security tool that oversells itself is worse than one
+that is merely weak.
+
+**It does:** hide the protected service from scanners (no port answers), make a
+captured knock a short-lived one-shot credential rather than a permanent one, and
+give you a sensor for on-path observers.
+
+**It does not:** stop a determined on-path attacker from racing a replay (until
+the `src_ip` binding lands), replace the protected service's own authentication,
+or protect you if the secret leaks *and* the attacker is at a network position
+you trust.
+
+**It is not a substitute for the service's authentication.** The knock opens a
+door; the service still asks for ID. That layering is the point — a knock-secret
+compromise is survivable precisely because sshd (or whatever is behind the port)
+asks for something the attacker does not have.
 
 ---
 
