@@ -259,10 +259,10 @@ trait: the interesting logic is written once and tested once.
 - The secret never crosses the wire. Only *derived* values do.
 - Sequences are single-use in practice: they're bound to a 30-second time step.
 - Nothing listens on the protected port until an authorised knock completes.
-- Constant-time-ish comparison is not needed here (we compare derived port
-  numbers that are already one-time), but we do compare HMACs with `==` only on
-  values that never leave the machine.
-- Secrets are zeroised on drop.
+- Secrets are compared in constant time (`MasterSecret::ct_eq`, wired into
+  `PartialEq`) and zeroised on drop.
+- An off-path attacker cannot ban an arbitrary address with a single spoofed
+  packet once the rate-limit fix lands (see §10) — today, they can.
 
 **What you must know before trusting it**
 
@@ -336,11 +336,19 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
 
 ### Security gaps, in priority order
 
-- [ ] **Fix the spoofed-source ban (critical).** `ban_threshold = 1` currently
-  lets an off-path attacker ban an arbitrary address by sending one packet with
-  a spoofed source. Fix: require a MAC-valid attempt (or at least some correct
-  progress) before a failure may count toward a ban. *This is the one real flaw
-  in the current design; everything else is hardening.*
+- [ ] **Replace the hard ban with a rate limit (critical).** `ban_threshold = 1`
+  currently lets an off-path attacker ban an arbitrary address with a single
+  spoofed packet. Agreed fix: **N failures per IP per rolling hour** (default
+  5) → temporary ban, instead of "one failure → permanent-ish ban".
+  - This raises the spoofing DoS from *one packet* to *N packets per hour per
+    victim*, which makes it unattractive but does not eliminate it. The residual
+    is closed by only counting a failure once the source has made some correct
+    progress, or once a MAC-valid attempt has failed. Do both if the budget
+    allows; the rate limit alone is a large improvement.
+  - Implementation note: a rolling window, not a fixed bucket, or an attacker
+    times bursts across the boundary. A small ring of recent failure timestamps
+    per IP is enough, and it fits the existing lazy-expiry tables.
+  - Keep the failure counters in the per-IP state that `sweep` already prunes.
 - [ ] **Bind the sequence to the source address (high).** Include `src_ip` in the
   HMAC input, so a replay from a different address derives a different sequence
   and matches nothing. This defeats both passive replay *and* the active race
@@ -392,6 +400,27 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
 
 ### Features and packaging
 
+- [ ] **Tunnel-aware grant lifetime (high, blocks the VPN deployment).** A fixed
+  30 s `open_ttl_seconds` kills a WireGuard tunnel at its first rekey (~120 s).
+  The grant must instead be held open *while the tunnel is alive* and released
+  when it dies. Needs a peer-state probe (`wg show` output or netlink) — a new,
+  small dependency, and the first real code for the VPN path.
+- [ ] **Idle / timed / held session teardown (agreed).** When a tunnel is up, the
+  operator chooses one of three policies: drop after N minutes of inactivity,
+  drop on a fixed timer regardless of activity, or leave the port up for the
+  session. All three are policy over the same tunnel-state signal, so they share
+  the probe above. Recorded because the third is deliberately *not* the default:
+  "leave it up" means the port is open until something else closes it, which is
+  a normal VPN with extra steps, and the operator should have to choose it.
+- [ ] **Drop the per-session derived VPN port.** Decided against: a 16-bit port
+  number is recovered by a scanner in about a second, so it is obscurity rather
+  than a control; it fights how VPNs work (WireGuard has one listen port per
+  interface, shared by all peers, so per-user ports would need one interface per
+  user); and it would force otkp to reconfigure the VPN daemon on every session.
+  Use a fixed non-default port and let the source-IP scoping be the control.
+- [ ] **Write up the VPN deployment (README §12).** knock → tunnel → services,
+  with the tunnel-lifetime problem and the random-port reasoning recorded, and
+  the "opened but no tunnel ever" forged-knock alert.
 - [ ] Multi-port open (open a *set* of services per user).
 - [ ] Key rotation and per-user revocation with a generation counter. (Bounds the
   blast radius of a leaked key and enables revocation. Note it does **not** help
