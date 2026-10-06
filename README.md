@@ -402,6 +402,19 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
   "service authentication failed from that same IP" is a strong forged-knock
   signal. The daemon cannot see this alone — it opens a hole and its knowledge
   ends there — so it needs the two log sources joined outside the daemon.
+- [ ] **Per-device keys with an enrolment registry (medium).** Today a key is
+  per-user, so "Alice's key" cannot be told apart from "Alice's key copied to
+  another machine". One key per *registered device* turns that into an anomaly
+  you can detect ("known key, unknown context"), which is the cheapest real
+  improvement to the attribution story in §11.2. Small change to the keyring
+  model: the enrolment key becomes `(user, device_id)`.
+- [ ] **Attribution events as a documented interface (medium).** §11.2 argues that
+  the value of this design is that every action traces to a named credential. That
+  is only true if the events are *exportable* — a stable, documented record of
+  `{user, credential/device, src_ip, time_step, outcome}` that a UEBA or SIEM can
+  consume. Right now the information exists in log lines; it should exist as a
+  structured stream. This is what makes the "tell the user they were compromised"
+  story implementable rather than aspirational.
 
 ### Features and packaging
 
@@ -491,6 +504,102 @@ targeted attacker who can phish you, sit on your network, or own your laptop.
 That is worth having. Removing the opportunistic tier is what most real-world
 "we got breached" stories are made of. But it is not the same as being unhackable,
 and any system that claims to be is one you should trust less, not more.
+
+### 11.2 Attribution: whose credential, and why that is not the same as who
+
+This section exists because the design gives you something genuinely rare, and it
+is easy to overclaim what that thing is. The distinction matters.
+
+**What you get, with certainty.** Because the knock binds to a per-user secret and
+the tunnel binds to a per-user key, every action traces to a *specific credential*.
+Not an IP, not a shared service account, not "someone on the VPN" — a named
+credential. Most systems cannot do this at all. It is the precondition for every
+question below, and it is worth stating plainly as the design's strongest
+non-obvious property.
+
+**What you do not get: victim versus perpetrator.** A key is a *bearer*
+credential. It proves whoever holds it, and nothing about who that is:
+
+| Who is acting | Evidence presented |
+|---|---|
+| Alice at her desk | Alice's key |
+| Mallory who phished Alice's key | Alice's key |
+| Malware on Alice's laptop | Alice's key |
+| Alice, gone rogue | Alice's key |
+
+All four are byte-identical. The key does not know who is holding it, so no amount
+of protocol design can separate them. Keep three levels apart:
+
+```
+1. Whose credential?          cryptographic    certain
+2. Was it used anomalously?   behavioural      probable
+3. Victim or perpetrator?     motivational     inferred, least reliable
+```
+
+OTKP delivers level 1. Level 3 is the insider-threat problem, and it is genuinely
+unsolved: the discriminator is motive, and motive is not observable. An entire
+product category (UEBA) exists to produce *risk scores* for it, not verdicts.
+
+**Where the signal actually lives — behaviour, not crypto.** The two cases tend to
+have different shapes:
+
+- **Compromise** shows *context* anomalies: familiar behaviour, unfamiliar context.
+  New country, 3am, a new device, a sudden burst after months of silence.
+- **Insider** shows *scope* anomalies: familiar context, out-of-scope behaviour.
+  Usual IP, usual hours, usual device — but touching data they have never touched,
+  probing systems outside their remit, slow exfiltration shaped like normal traffic.
+
+So the signal exists, but it is a heuristic with both false positives and false
+negatives. A careful attacker mimics normal behaviour; a careless insider trips
+context alarms.
+
+**Levers, if you want to push on level 3:**
+
+1. **Per-device keys with an enrolment registry.** Not one key per user — one per
+   *registered device*. A copied key then shows up as "known key, unknown context",
+   and "why is Alice's laptop key active from two continents?" becomes answerable.
+   The cheapest real improvement, and a small change to the keyring model.
+2. **Step-up authentication on sensitive actions.** If the attacker holds only the
+   VPN key, step-up fails — a compromise signal. If the insider holds everything,
+   it succeeds — no help. Separates *stolen key* from *full credentials*, not
+   *victim* from *insider*.
+3. **Behavioural baselining (UEBA).** The real answer, and it is a separate system,
+   not a feature of the knock. It consumes the attributed events this daemon emits,
+   plus the VPN's, plus the service logs, and produces risk scores.
+
+All three are *additional software*, consistent with the architecture in §12: otkp
+emits attributed events; a separate component reasons about them. Do not put the
+reasoning inside the daemon.
+
+**The claim to make, and the one to avoid.**
+
+Avoid: *"we know whether the user was hacked or turned against us."* That
+overclaims, and a security interviewer will take it apart in about thirty seconds.
+
+Make: *"we can attribute every action to a specific user credential with certainty
+— which most designs cannot — and that attribution is the precondition for any
+compromise-versus-insider analysis. The classification itself needs behavioural
+analytics on top, and even then it is a probability, not a verdict."*
+
+That version is true, specific, and demonstrably your own design decision.
+
+**Why the attribution is still worth having, on its own.** Even without any
+classification, knowing *which credential* was used is most of the operational
+value. The two consequences that follow are real and are not hypothetical:
+
+- **You can tell a user they have been compromised.** When a knock or a tunnel
+  authenticates with Alice's credential from somewhere Alice has never been, that
+  is a fact you can act on and a warning you can give. For most organisations the
+  common case is not an insider; it is a leaked or stolen credential, and this is
+  exactly the case the attribution catches.
+- **It changes the attacker's calculus.** An attacker who knows that every action
+  is bound to a named credential, and that the victim will be told, has a much
+  worse position than one operating behind a shared account or a raw IP. That is a
+  real deterrent effect, and it is a legitimate thing to say out loud.
+
+What it is not: a guarantee that the attacker stops, or a way to tell a determined
+insider from a victim. Attribution raises the cost and enables the warning. It does
+not adjudicate motive.
 
 ---
 
