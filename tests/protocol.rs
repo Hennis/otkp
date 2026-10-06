@@ -105,7 +105,7 @@ fn rfc4231_hmac_sha256_vector() {
 /// KID: The exact spelling of the envelope we put the name and page number on.
 #[test]
 fn knock_message_is_byte_exact() {
-    let msg = knock_message("alice", 1);
+    let msg = knock_message("alice", 1, None);
 
     // Build the expected bytes by hand, from the spec:
     //   "otkp-knock-v1" || 0x00 || "alice" || 0x00 || 0x0000000000000001
@@ -132,12 +132,21 @@ fn knock_message_is_byte_exact() {
 ///      person's name.
 #[test]
 fn knock_message_separators_prevent_ambiguity() {
-    assert_ne!(knock_message("alice", 1), knock_message("aliceb", 1));
+    assert_ne!(
+        knock_message("alice", 1, None),
+        knock_message("aliceb", 1, None)
+    );
     // The time step must also be unambiguous: step 1 and step 10 must differ.
-    assert_ne!(knock_message("alice", 1), knock_message("alice", 10));
+    assert_ne!(
+        knock_message("alice", 1, None),
+        knock_message("alice", 10, None)
+    );
     // And a user name containing a NUL must not be able to forge a boundary
     // (the step bytes follow a fixed-width 8-byte field, so this holds).
-    assert_ne!(knock_message("alice\u{0}", 1), knock_message("alice", 1));
+    assert_ne!(
+        knock_message("alice\u{0}", 1, None),
+        knock_message("alice", 1, None)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +180,11 @@ fn client_and_server_derivations_agree() {
     // Sweep a range of time steps so this is not a one-off coincidence.
     for step in [0u64, 1, 2, 1000, 58_655_938, u64::MAX / 2] {
         // Server path.
-        let server_spec = keyring.spec_for("alice", step, &cfg).unwrap();
+        let server_spec = keyring.spec_for("alice", step, &cfg, None).unwrap();
 
         // Client path: parse the text the user holds, then derive.
         let client_secret = MasterSecret::from_text(&as_text).unwrap();
-        let client_spec = derive_knock_spec(&client_secret, "alice", step, &cfg);
+        let client_spec = derive_knock_spec(&client_secret, "alice", step, &cfg, None);
 
         assert_eq!(
             server_spec, client_spec,
@@ -196,7 +205,7 @@ fn derive_with_hotp_uses_one_window() {
     let cfg = ServerConfig::default();
     let secret = MasterSecret::from_bytes([7; 32]);
     for step in [0u64, 42, 999_999] {
-        let (spec, code) = derive_with_hotp(&secret, "alice", step, &cfg);
+        let (spec, code) = derive_with_hotp(&secret, "alice", step, &cfg, None);
         assert_eq!(spec.time_step, step);
         assert_eq!(code, hotp(secret.as_bytes(), step, 6));
     }
@@ -237,7 +246,7 @@ fn ports_always_inside_configured_ranges() {
 
         let secret = MasterSecret::from_bytes([0x33; 32]);
         for step in 0..3_000u64 {
-            let spec = derive_knock_spec(&secret, "alice", step, &cfg);
+            let spec = derive_knock_spec(&secret, "alice", step, &cfg, None);
             for p in &spec.knock_ports {
                 assert!(
                     cfg.knock_range.contains(*p),
@@ -269,7 +278,7 @@ fn no_adjacent_duplicate_ports_ever() {
     let cfg = ServerConfig::default();
     let secret = MasterSecret::from_bytes([0x44; 32]);
     for step in 0..5_000u64 {
-        let spec = derive_knock_spec(&secret, "alice", step, &cfg);
+        let spec = derive_knock_spec(&secret, "alice", step, &cfg, None);
         for pair in spec.knock_ports.windows(2) {
             assert_ne!(pair[0], pair[1], "adjacent duplicate at step {step}");
         }
@@ -295,7 +304,7 @@ fn sequences_are_well_distributed() {
     let mut seen = std::collections::HashSet::new();
     for i in 0..=255u8 {
         let secret = MasterSecret::from_bytes([i; 32]);
-        let spec = derive_knock_spec(&secret, "alice", 1, &cfg);
+        let spec = derive_knock_spec(&secret, "alice", 1, &cfg, None);
         seen.insert((spec.knock_ports.clone(), spec.open_port));
     }
     assert_eq!(
@@ -310,7 +319,7 @@ fn sequences_are_well_distributed() {
     let mut seen = std::collections::HashSet::new();
     for i in 0..256 {
         let user = format!("user{i}");
-        let spec = derive_knock_spec(&secret, &user, 1, &cfg);
+        let spec = derive_knock_spec(&secret, &user, 1, &cfg, None);
         seen.insert((spec.knock_ports.clone(), spec.open_port));
     }
     assert_eq!(
@@ -324,7 +333,7 @@ fn sequences_are_well_distributed() {
     // windows should almost certainly be all-distinct.
     let mut seen = std::collections::HashSet::new();
     for step in 0..5_000u64 {
-        let spec = derive_knock_spec(&secret, "alice", step, &cfg);
+        let spec = derive_knock_spec(&secret, "alice", step, &cfg, None);
         seen.insert((spec.knock_ports.clone(), spec.open_port));
     }
     assert!(

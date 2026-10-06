@@ -95,7 +95,7 @@
 //! // which is exactly what you want in a doctest.
 //! let secret = MasterSecret::from_bytes([7u8; 32]);
 //! let cfg = ServerConfig::default();
-//! let spec = crypto::derive_knock_spec(&secret, "alice", 1234, &cfg);
+//! let spec = crypto::derive_knock_spec(&secret, "alice", 1234, &cfg, None);
 //!
 //! // The sequence length is always inside the configured bounds...
 //! assert!(spec.knock_ports.len() >= cfg.knock_count_min as usize);
@@ -170,6 +170,18 @@ pub use secret::MasterSecret;
 /// KID: It is the name of the game written on the box. If we change the rules
 ///      of the game, we give it a new name, so nobody mixes up the old rules.
 pub const PROTOCOL_LABEL: &[u8] = b"otkp-knock-v1";
+
+/// The protocol label used when the sequence is bound to the source address.
+///
+/// EXPERT: A *distinct* label for the source-bound variant, for exactly the
+///         domain-separation reason given above. The two derivations differ, so
+///         they must not share a label -- otherwise "the same label" would map to
+///         two different wire formats depending on configuration, which is the
+///         ambiguity the label exists to prevent. A client and server that
+///         disagree about binding mode then derive different sequences and fail
+///         loudly, which is what we want.
+/// KID: A second name for the second version of the game.
+pub const PROTOCOL_LABEL_IPBOUND: &[u8] = b"otkp-knock-v1-ipbind";
 
 /// The default number of seconds in one time window.
 ///

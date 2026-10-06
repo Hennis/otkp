@@ -43,6 +43,45 @@ digest = HMAC-SHA256(
 `digest` is 32 bytes. We read it as a stream of big-endian `u16` values, starting
 at byte index **1** (byte 0 is reserved for the knock count).
 
+### 2.1 Source-address binding (optional)
+
+When `bind_to_source_ip` is enabled, the observed source address is appended to
+the message and a *different* label is used:
+
+```
+digest = HMAC-SHA256(
+    key  = secret,
+    msg  = "otkp-knock-v1-ipbind"   // 19 ASCII bytes: the bound-variant label
+         || 0x00
+         || user_id_utf8
+         || 0x00
+         || time_step_be64
+         || family_byte            // 4 for IPv4, 6 for IPv6
+         || address_bytes          // 4 or 16 bytes, raw (network order)
+)
+```
+
+Two consequences, both deliberate:
+
+- **A sequence matches only when replayed from the same address.** An attacker
+  who captures Alice's knock and replays it from their own address causes the
+  server to derive the expectation for *their* address, which is a different
+  sequence, so nothing matches. This defeats passive replay *and* the active race
+  (injecting the captured packets before Alice's own arrive).
+- **The label differs from the unbound variant.** A client and server that
+  disagree about binding mode derive different sequences and fail loudly, rather
+  than half-working. A client with binding off talking to a bound server simply
+  never matches.
+
+Cost, stated plainly: **binding breaks NAT and mobility.** The client must know
+the address the server will observe, which behind NAT is not its local address.
+The client therefore takes an explicit `--bind-ip <addr>`. This is why binding is
+off by default.
+
+The `family_byte` exists so an IPv4 address cannot collide with a prefix of an
+IPv6 address; the realistic case is an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`),
+which is a *different* input and therefore a different sequence.
+
 EXPERT: Including `user_id` in the message is *domain separation* -- it guarantees
 two users with the same secret (e.g. after a botched copy-paste) still get
 different sequences, and it prevents cross-user confusion.

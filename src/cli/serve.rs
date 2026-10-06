@@ -82,6 +82,21 @@ pub fn run(options: &Options) -> Result<()> {
     }
     crate::log_info!("loaded {} enrolled user(s)", keyring.len());
 
+    // Report the replay posture plainly. An operator who does not know binding is
+    // off cannot make an informed decision about it.
+    if config.bind_to_source_ip {
+        crate::log_info!(
+            "source-IP binding is ON: sequences are bound to the observed address \
+             (replay from another address will not match)"
+        );
+    } else {
+        crate::log_warn!(
+            "source-IP binding is OFF: a captured sequence can be replayed from any \
+             address within the same time window. Set \"bind_to_source_ip\": true to \
+             close this (note: this breaks NAT and mobility)."
+        );
+    }
+
     // ------------------------------------------------------------------
     // 3. Load the ban list (missing file is fine; it is the normal first run).
     // ------------------------------------------------------------------

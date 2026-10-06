@@ -229,6 +229,7 @@ Useful flags:
 | `--source udp\|raw` | `serve` | How knocks are observed (see §7) |
 | `--step-offset -1\|0\|1` | `knock` | Try the previous/next time step if your clock is off |
 | `--mode udp\|raw` | `knock` | How knocks are *sent* (must match the server's `--source`) |
+| `--bind-ip ADDR` | `knock` | The address the server will observe, when the server binds to source IP (needed behind NAT) |
 | `--ban-fail-threshold N` | `serve` | Failures **inside the rolling window** before a ban (default `5`) |
 | `--ban-window SECS` | `serve` | Length of the rolling failure window (default `3600`) |
 | `--open-ttl SECS` | `serve` | How long an opened port stays open |
@@ -266,6 +267,14 @@ trait: the interesting logic is written once and tested once.
   packet once the rate-limit fix lands (see §10) — today, they can.
 
 **What you must know before trusting it**
+
+- **Source-IP binding is off by default.** Turn it on (`"bind_to_source_ip": true`)
+  and a captured sequence can only be replayed from the *same address*, which
+  closes both passive replay and the active race. The cost is that it breaks NAT
+  and mobility: the client must be told the egress address the server will see
+  (`otkp knock --bind-ip ...`). With binding off, a sequence captured on the wire
+  is replayable from anywhere for the remainder of its window. The daemon logs a
+  warning at startup when binding is off, so this is not a silent default.
 
 - **The ban is a rolling-window rate limit** (default: 5 failures per IP per
   hour), not a one-strike rule. Earlier versions banned on the first failure,
@@ -354,13 +363,19 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
     determined attacker. Close it by only counting a failure once the source has
     made some correct progress, or once a MAC-valid attempt has failed. The
     rolling window raises the cost; it does not remove the attack.
-- [ ] **Bind the sequence to the source address (high).** Include `src_ip` in the
-  HMAC input, so a replay from a different address derives a different sequence
-  and matches nothing. This defeats both passive replay *and* the active race
-  (see the burn, below). Cost: breaks NAT and mobility, because the client must
-  know the egress address the server sees. Popeea et al. (2011) list client IP as
-  a sequence input, so this is a correct, known fix rather than a new idea.
-- [ ] **[planned path] Single-use sequences — the "burn" (high).** Once a
+- [x] **Bind the sequence to the source address.** Done, behind
+  `bind_to_source_ip` (default **off**). The address is appended to the HMAC input
+  under a distinct protocol label (`otkp-knock-v1-ipbind`), so a sequence captured
+  on the wire matches only when replayed from the same address — defeating both
+  passive replay and the active race. The client takes `--bind-ip` for NAT.
+  - Why off by default: it breaks NAT and mobility, so it must be a deliberate
+    choice. The daemon warns at startup when it is off.
+  - Popeea et al. (2011) list client IP as a sequence input, so this is a correct,
+    known fix rather than a new idea — recorded so the claim is not overclaimed.
+  - **Residual:** with binding *off*, replay from another address still succeeds
+    within the window. Binding on closes it; the burn (below) narrows the window
+    in which a race is possible but does not remove the race by itself.
+- [ ] **Single-use sequences — the "burn" (high).** Once a
   `(user, time_step)` sequence has authorised anyone, mark it used and never
   accept it again for the rest of its window. This is the standard replay cache
   (Kerberos; fwknop tracks SPA digests the same way) and it is purely
@@ -377,7 +392,7 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
     and win the race. The burn narrows replay to "attacker must beat Alice",
     which is a real narrowing but not replay resistance. The `src_ip` binding is
     what removes the race.
-- [ ] **[planned path] HMAC-authenticated knock payload (high).** `AF_PACKET`
+- [ ] **HMAC-authenticated knock payload (high).** `AF_PACKET`
   captures the whole frame including the UDP payload, so a `raw`-mode knock *can*
   carry a MAC. (An earlier note in this file wrongly claimed headers-only; the
   limitation is a definitional one inherited from `knockd`, not a technical one.

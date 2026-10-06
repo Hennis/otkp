@@ -112,7 +112,10 @@ pub fn run(options: &Options, user: &str) -> Result<()> {
     // same `spec_and_hotp_for` path the daemon uses -- so what we print is
     // exactly what the daemon will expect.
     let step = time_step(now, config.step_seconds);
-    let (spec, hotp_code) = keyring.spec_and_hotp_for(user, step, &config)?;
+    // `None` for the source address: enrolment prints the *unbound* sequence,
+    // which is what a client derives by default. If the server has binding
+    // enabled, `verify` is the tool that shows the per-address sequences.
+    let (spec, hotp_code) = keyring.spec_and_hotp_for(user, step, &config, None)?;
 
     // ------------------------------------------------------------------
     // 5. Print the enrolment information, once, to stdout.
@@ -406,7 +409,7 @@ mod tests {
     fn enrolment_uri_round_trips() {
         let cfg = ServerConfig::default();
         let secret = crate::secret::MasterSecret::from_bytes([3; 32]);
-        let spec = crate::crypto::derive_knock_spec(&secret, "alice", 100, &cfg);
+        let spec = crate::crypto::derive_knock_spec(&secret, "alice", 100, &cfg, None);
 
         let uri = enrolment_uri(
             "alice",
@@ -476,11 +479,11 @@ mod tests {
         // Derive through the keyring helper (what `enroll` uses)...
         let now = unix_now();
         let step = time_step(now, cfg.step_seconds);
-        let (via_helper, code) = kr.spec_and_hotp_for("alice", step, &cfg).unwrap();
+        let (via_helper, code) = kr.spec_and_hotp_for("alice", step, &cfg, None).unwrap();
 
         // ...and derive directly from the stored secret (what the engine does).
         let enrollment = kr.get("alice").unwrap();
-        let (direct, direct_code) = derive_with_hotp(&enrollment.secret, "alice", step, &cfg);
+        let (direct, direct_code) = derive_with_hotp(&enrollment.secret, "alice", step, &cfg, None);
 
         assert_eq!(via_helper, direct);
         assert_eq!(code, direct_code);

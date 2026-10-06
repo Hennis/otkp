@@ -32,6 +32,7 @@ use crate::error::{OtkpError, Result};
 use crate::secret::MasterSecret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 /// One enrolled user: their name, their secret, and some bookkeeping.
@@ -221,7 +222,13 @@ impl Keyring {
     ///         the problem is "that user is not on the list", and naming the
     ///         right problem is half of a good error message.
     /// KID: "Look up Bob and work out his taps for this page of the book."
-    pub fn spec_for(&self, user: &str, step: u64, cfg: &ServerConfig) -> Result<KnockSpec> {
+    pub fn spec_for(
+        &self,
+        user: &str,
+        step: u64,
+        cfg: &ServerConfig,
+        src_ip: Option<IpAddr>,
+    ) -> Result<KnockSpec> {
         let enrollment = self
             .get(user)
             .ok_or_else(|| OtkpError::not_found(format!("user '{user}' is not enrolled")))?;
@@ -230,6 +237,7 @@ impl Keyring {
             user,
             step,
             cfg,
+            src_ip,
         ))
     }
 
@@ -243,11 +251,18 @@ impl Keyring {
         user: &str,
         step: u64,
         cfg: &ServerConfig,
+        src_ip: Option<IpAddr>,
     ) -> Result<(KnockSpec, u32)> {
         let enrollment = self
             .get(user)
             .ok_or_else(|| OtkpError::not_found(format!("user '{user}' is not enrolled")))?;
-        Ok(derive_with_hotp(&enrollment.secret, user, step, cfg))
+        Ok(derive_with_hotp(
+            &enrollment.secret,
+            user,
+            step,
+            cfg,
+            src_ip,
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -394,7 +409,7 @@ mod tests {
     fn spec_for_unknown_user_is_not_found() {
         let kr = Keyring::new();
         let cfg = ServerConfig::default();
-        let err = kr.spec_for("nobody", 1, &cfg).unwrap_err();
+        let err = kr.spec_for("nobody", 1, &cfg, None).unwrap_err();
         assert!(matches!(err, OtkpError::NotFound(_)));
     }
 
@@ -403,9 +418,14 @@ mod tests {
         let mut kr = Keyring::new();
         kr.enroll("alice", 1).unwrap();
         let cfg = ServerConfig::default();
-        let via_keyring = kr.spec_for("alice", 5, &cfg).unwrap();
-        let direct =
-            crate::crypto::derive_knock_spec(&kr.get("alice").unwrap().secret, "alice", 5, &cfg);
+        let via_keyring = kr.spec_for("alice", 5, &cfg, None).unwrap();
+        let direct = crate::crypto::derive_knock_spec(
+            &kr.get("alice").unwrap().secret,
+            "alice",
+            5,
+            &cfg,
+            None,
+        );
         assert_eq!(via_keyring, direct);
     }
 

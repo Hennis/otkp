@@ -620,7 +620,7 @@ mod tests {
         config.validate().unwrap();
 
         let step = crate::crypto::time_step(now, config.step_seconds);
-        let spec = crate::crypto::derive_knock_spec(&known, "alice", step, &config);
+        let spec = crate::crypto::derive_knock_spec(&known, "alice", step, &config, None);
 
         let engine = Engine::new(keyring, config.clone(), crate::banlist::BanList::new());
         (engine, config, spec, known)

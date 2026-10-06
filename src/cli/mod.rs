@@ -120,6 +120,8 @@ pub struct Options {
     pub mode: Option<String>,
     /// Time-step offset to try (-1, 0 or +1), for clock-skew workarounds.
     pub step_offset: i64,
+    /// The address the server will observe, for source-bound derivations.
+    pub bind_ip: Option<String>,
 
     // ---- `serve` (daemon) ----
     /// Which firewall backend to use.
@@ -167,6 +169,7 @@ impl Default for Options {
             secret: None,
             mode: None,
             step_offset: 0,
+            bind_ip: None,
             firewall: None,
             source: None,
             step_seconds: None,
@@ -370,6 +373,7 @@ fn unknown_flag(flag: &str) -> OtkpError {
         "--secret",
         "--mode",
         "--step-offset",
+        "--bind-ip",
         "--firewall",
         "--source",
         "--step-seconds",
@@ -419,6 +423,7 @@ fn is_known_value_flag(flag: &str) -> bool {
             | "--secret"
             | "--mode"
             | "--step-offset"
+            | "--bind-ip"
             | "--firewall"
             | "--source"
             | "--step-seconds"
@@ -468,6 +473,7 @@ fn apply_flag_value(options: &mut Options, flag: &str, value: &str) -> Result<()
         "--secret" => options.secret = Some(value.to_string()),
         "--mode" => options.mode = Some(value.to_string()),
         "--step-offset" => options.step_offset = parse_i64(flag, value)?,
+        "--bind-ip" => options.bind_ip = Some(value.to_string()),
         "--firewall" => options.firewall = Some(value.to_string()),
         "--source" => options.source = Some(value.to_string()),
         "--step-seconds" => options.step_seconds = Some(parse_u64(flag, value)?),

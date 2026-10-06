@@ -314,6 +314,29 @@ pub struct ServerConfig {
     /// KID: How long you sit in the naughty corner. Zero means "forever".
     pub ban_ttl_seconds: u64,
 
+    /// Bind each derived sequence to the source IP address.
+    ///
+    /// EXPERT: When `true`, the observed source address is an input to the HMAC,
+    ///         so a sequence captured on the wire matches only when replayed
+    ///         *from the same address*. This defeats both passive replay and the
+    ///         active race (an on-path attacker injecting a captured sequence
+    ///         from their own address derives a different expectation and matches
+    ///         nothing).
+    ///
+    /// **The cost is real: this breaks NAT and mobility.** The client must
+    ///         know the address the server will observe, and behind NAT that is
+    ///         not the client's local address. So a client on a NATed network
+    ///         cannot use this mode without being told its egress address
+    ///         explicitly. This is why the default is `false` and why the daemon
+    ///         warns loudly when it is off.
+    ///
+    /// The trade is exactly the classic one: security against replay, at
+    ///         the price of address agility. Choose deliberately.
+    /// KID: When this is on, the secret knock only works if you knock from your
+    ///      own front door. Someone who copies your knock and tries it from their
+    ///      house gets a completely different knock back and is told "no".
+    pub bind_to_source_ip: bool,
+
     /// How long an opened port stays open, in seconds.
     pub open_ttl_seconds: u64,
 
@@ -370,6 +393,9 @@ impl Default for ServerConfig {
             ban_fail_threshold: 5,
             ban_window_seconds: 3600,
             ban_ttl_seconds: 3600,
+            // Off by default: see the field docs -- enabling it breaks NAT and
+            // mobility, so it must be a deliberate operator choice.
+            bind_to_source_ip: false,
             open_ttl_seconds: 30,
             inter_knock_delay_ms: 80,
             firewall: FirewallConfig::default(),

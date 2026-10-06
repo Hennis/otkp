@@ -97,7 +97,18 @@ pub fn run(options: &Options) -> Result<()> {
     // distribute a client config. A future version will carry the ranges in the
     // enrolment URI; the parser already tolerates the extra parameters.
     let cfg = crate::config::ServerConfig::default();
-    let spec = derive_knock_spec(&secret, &client.user, step, &cfg);
+    // The client cannot know the server's `bind_to_source_ip` setting (it has no
+    // config file), so it derives the *unbound* sequence by default. If the
+    // server binds to the source address, the user passes `--bind-ip <addr>` to
+    // say what the server will observe -- necessary behind NAT, where the local
+    // address is not the egress address.
+    let bound_ip = match client.bind_ip.as_deref() {
+        Some(s) => Some(s.parse::<std::net::IpAddr>().map_err(|_| {
+            OtkpError::config(format!("--bind-ip expects an IP address, got '{s}'"))
+        })?),
+        None => None,
+    };
+    let spec = derive_knock_spec(&secret, &client.user, step, &cfg, bound_ip);
 
     // ------------------------------------------------------------------
     // 5. Report what we are about to do.
@@ -177,6 +188,8 @@ struct ResolvedClient {
     step_offset: i64,
     /// Send to real ports rather than to the listener.
     raw_mode: bool,
+    /// The address the server will observe, when binding is enabled server-side.
+    bind_ip: Option<String>,
     /// Milliseconds between knocks.
     inter_knock_delay_ms: u64,
 }
@@ -263,6 +276,7 @@ fn resolve_client_config(options: &Options) -> Result<ResolvedClient> {
         step_seconds: step_seconds.unwrap_or(crate::DEFAULT_STEP_SECONDS),
         step_offset: options.step_offset,
         raw_mode,
+        bind_ip: options.bind_ip.clone(),
         // Default matches `ServerConfig::default().inter_knock_delay_ms`.
         inter_knock_delay_ms: options.inter_knock_delay_ms.unwrap_or(80),
     })
@@ -452,14 +466,14 @@ mod tests {
         // possible bug in the project.
         let cfg = crate::config::ServerConfig::default();
         let secret = MasterSecret::from_bytes([9; 32]);
-        let spec: KnockSpec = derive_knock_spec(&secret, "alice", 12345, &cfg);
+        let spec: KnockSpec = derive_knock_spec(&secret, "alice", 12345, &cfg, None);
         let via_keyring_helper = {
             let json = format!(
                 r#"{{"entries":{{"alice":{{"user":"alice","secret":"{}","enrolled_at":0}}}}}}"#,
                 secret.to_base32()
             );
             let kr: crate::keyring::Keyring = serde_json::from_str(&json).unwrap();
-            kr.spec_for("alice", 12345, &cfg).unwrap()
+            kr.spec_for("alice", 12345, &cfg, None).unwrap()
         };
         assert_eq!(spec, via_keyring_helper);
     }

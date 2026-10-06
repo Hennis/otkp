@@ -200,7 +200,7 @@ fn config() -> ServerConfig {
 /// The spec for "alice" at the given wall-clock time.
 fn spec_at(cfg: &ServerConfig, now: u64) -> KnockSpec {
     let step = time_step(now, cfg.step_seconds);
-    derive_knock_spec(&MasterSecret::from_bytes(SECRET), "alice", step, cfg)
+    derive_knock_spec(&MasterSecret::from_bytes(SECRET), "alice", step, cfg, None)
 }
 
 /// Run the daemon loop until `n` events have been processed (or a safety cap).

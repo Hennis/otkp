@@ -946,7 +946,7 @@ mod tests {
         // Derive a spec.
         let cfg = ServerConfig::default();
         let secret = MasterSecret::from_bytes([0x11; 32]);
-        let spec = crate::crypto::derive_knock_spec(&secret, "alice", 99, &cfg);
+        let spec = crate::crypto::derive_knock_spec(&secret, "alice", 99, &cfg, None);
 
         // Send it, with zero delay so the test is fast.
         let target = SendTarget {

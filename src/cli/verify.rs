@@ -126,7 +126,7 @@ pub fn run(options: &Options, user: &str) -> Result<()> {
     // One line per accepted step. We mark the "current" one so the eye lands on
     // it first.
     for step in lo..=hi {
-        let spec = derive_knock_spec(&enrollment.secret, user, step, &config);
+        let spec = derive_knock_spec(&enrollment.secret, user, step, &config, None);
         // A marker for the step the server considers "now".
         let marker = if step == now_step { "  <-- now" } else { "" };
         println!(

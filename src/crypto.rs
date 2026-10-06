@@ -34,11 +34,12 @@
 use crate::config::ServerConfig;
 use crate::error::{OtkpError, Result};
 use crate::secret::MasterSecret;
-use crate::{DEFAULT_STEP_SECONDS, PROTOCOL_LABEL};
+use crate::{DEFAULT_STEP_SECONDS, PROTOCOL_LABEL, PROTOCOL_LABEL_IPBOUND};
 use hmac::{Hmac, Mac}; // `Hmac` is generic over the hash; `Mac` is the trait with update/finalize.
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::Sha256;
+use std::net::IpAddr;
 
 /// `Hmac<Sha256>` is a mouthful; this alias makes signatures readable.
 ///
@@ -254,17 +255,57 @@ impl KnockSpec {
 ///         directly, and a second implementation in another language has an
 ///         unambiguous reference. The `0x00` separators are load-bearing: without
 ///         them, `("alice", "bob")` and `("aliceb", "ob")` would hash identically.
+///
+/// When `src_ip` is `Some`, the address is appended as a final field and
+///         the *ip-bound* label is used instead. Appending rather than
+///         prepending keeps the original layout intact as a prefix, which makes
+///         the two formats easy to tell apart when debugging and impossible to
+///         confuse in a test.
 /// KID: The exact envelope we put the name and the page number on, so two
 ///      different people's letters can never get swapped.
-pub fn knock_message(user: &str, step: u64) -> Vec<u8> {
-    // Pre-size: label + NUL + user + NUL + 8 bytes.
-    let mut msg = Vec::with_capacity(PROTOCOL_LABEL.len() + 1 + user.len() + 1 + 8);
-    // `extend_from_slice` appends raw bytes (not a Rust string).
-    msg.extend_from_slice(PROTOCOL_LABEL);
+pub fn knock_message(user: &str, step: u64, src_ip: Option<IpAddr>) -> Vec<u8> {
+    // Choose the label for the mode. Two distinct labels, so a client and a
+    // server that disagree about binding mode derive different sequences and
+    // fail loudly rather than half-working.
+    let label: &[u8] = match src_ip {
+        None => PROTOCOL_LABEL,
+        Some(_) => PROTOCOL_LABEL_IPBOUND,
+    };
+
+    // An IPv6 address is 16 bytes and an IPv4 address is 4, so the field is
+    // variable-length -- which is exactly why the label differs between modes
+    // and why the address is the *last* field (nothing follows it that could be
+    // ambiguous about where the address ended).
+    let ip_len = match src_ip {
+        Some(IpAddr::V4(_)) => 4,
+        Some(IpAddr::V6(_)) => 16,
+        None => 0,
+    };
+
+    // Pre-size: label + NUL + user + NUL + 8 bytes (+ 1 family byte + address).
+    let mut msg = Vec::with_capacity(label.len() + 1 + user.len() + 1 + 8 + 1 + ip_len);
+    msg.extend_from_slice(label);
     msg.push(0x00); // separator
     msg.extend_from_slice(user.as_bytes());
     msg.push(0x00); // separator
     msg.extend_from_slice(&step.to_be_bytes()); // 8-byte big-endian
+
+    if let Some(ip) = src_ip {
+        // One family byte, then the raw address bytes. The family byte makes the
+        // field self-describing: without it, an IPv4 address could theoretically
+        // collide with a prefix of an IPv6 address.
+        match ip {
+            IpAddr::V4(v4) => {
+                msg.push(4);
+                msg.extend_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                msg.push(6);
+                msg.extend_from_slice(&v6.octets());
+            }
+        }
+    }
+
     msg
 }
 
@@ -305,15 +346,22 @@ fn be16(digest: &[u8; 32], i: usize) -> u16 {
 ///         give the same outputs, it touches no globals, does no I/O, and reads
 ///         no clock. Purity is what makes the protocol testable with fixed
 ///         vectors and what lets the client and server agree without talking.
-/// KID: Read the recipe book page for this person, and write out the taps.
+///
+/// `src_ip` is `Some(addr)` when the config enables `bind_to_source_ip`,
+///         and `None` otherwise. Passing it explicitly (rather than reading the
+///         config here) keeps the function pure and makes the two modes testable
+///         side by side.
+/// KID: Read the recipe book page for this person, and write out the taps. If we
+///      are in "your own front door" mode, the address is part of the recipe.
 pub fn derive_knock_spec(
     secret: &MasterSecret,
     user: &str,
     step: u64,
     cfg: &ServerConfig,
+    src_ip: Option<IpAddr>,
 ) -> KnockSpec {
     // Step 1: the keyed digest. `as_bytes` gives `&[u8; 32]`.
-    let digest = hmac_sha256(secret.as_bytes(), &knock_message(user, step));
+    let digest = hmac_sha256(secret.as_bytes(), &knock_message(user, step, src_ip));
 
     // Step 2: how many knocks? One byte of the digest, folded into the allowed
     // count range. Using `digest[0]` for this keeps the count independent of the
@@ -371,8 +419,9 @@ pub fn derive_with_hotp(
     user: &str,
     step: u64,
     cfg: &ServerConfig,
+    src_ip: Option<IpAddr>,
 ) -> (KnockSpec, u32) {
-    let spec = derive_knock_spec(secret, user, step, cfg);
+    let spec = derive_knock_spec(secret, user, step, cfg, src_ip);
     // HOTP's counter is the same integer as our time step -- the whole reason
     // HOTP and TOTP interoperate.
     let code = hotp(secret.as_bytes(), step, 6);
@@ -386,9 +435,14 @@ pub fn derive_with_hotp(
 ///         the step from the config, not from `DEFAULT_STEP_SECONDS`, so a
 ///         non-default config is honoured.
 /// KID: "What are the taps right this second?"
-pub fn derive_now(secret: &MasterSecret, user: &str, cfg: &ServerConfig) -> KnockSpec {
+pub fn derive_now(
+    secret: &MasterSecret,
+    user: &str,
+    cfg: &ServerConfig,
+    src_ip: Option<IpAddr>,
+) -> KnockSpec {
     let step = time_step(unix_now(), cfg.step_seconds);
-    derive_knock_spec(secret, user, step, cfg)
+    derive_knock_spec(secret, user, step, cfg, src_ip)
 }
 
 /// Parse a `--mode` / config string into a validated transport mode.
@@ -495,8 +549,8 @@ mod tests {
 
     #[test]
     fn knock_message_has_domain_separation() {
-        let a = knock_message("alice", 1);
-        let b = knock_message("aliceb", 1);
+        let a = knock_message("alice", 1, None);
+        let b = knock_message("aliceb", 1, None);
         // The NUL separators must make these different byte strings.
         assert_ne!(a, b);
         // And the label must be at the front.
@@ -506,16 +560,16 @@ mod tests {
     #[test]
     fn derivation_is_deterministic() {
         let (secret, cfg) = fixture();
-        let a = derive_knock_spec(&secret, "alice", 42, &cfg);
-        let b = derive_knock_spec(&secret, "alice", 42, &cfg);
+        let a = derive_knock_spec(&secret, "alice", 42, &cfg, None);
+        let b = derive_knock_spec(&secret, "alice", 42, &cfg, None);
         assert_eq!(a, b);
     }
 
     #[test]
     fn different_steps_give_different_sequences() {
         let (secret, cfg) = fixture();
-        let a = derive_knock_spec(&secret, "alice", 42, &cfg);
-        let b = derive_knock_spec(&secret, "alice", 43, &cfg);
+        let a = derive_knock_spec(&secret, "alice", 42, &cfg, None);
+        let b = derive_knock_spec(&secret, "alice", 43, &cfg, None);
         // It is *possible* (though astronomically unlikely with these ranges)
         // that two windows coincide. If this test ever fails, suspect the
         // derivation, not the RNG -- the probability is ~1/(10^4 * 10^4 ...).
@@ -525,16 +579,16 @@ mod tests {
     #[test]
     fn different_users_give_different_sequences() {
         let (secret, cfg) = fixture();
-        let a = derive_knock_spec(&secret, "alice", 42, &cfg);
-        let b = derive_knock_spec(&secret, "bob", 42, &cfg);
+        let a = derive_knock_spec(&secret, "alice", 42, &cfg, None);
+        let b = derive_knock_spec(&secret, "bob", 42, &cfg, None);
         assert_ne!(a.knock_ports, b.knock_ports);
     }
 
     #[test]
     fn different_secrets_give_different_sequences() {
         let cfg = ServerConfig::default();
-        let a = derive_knock_spec(&MasterSecret::from_bytes([1; 32]), "alice", 42, &cfg);
-        let b = derive_knock_spec(&MasterSecret::from_bytes([2; 32]), "alice", 42, &cfg);
+        let a = derive_knock_spec(&MasterSecret::from_bytes([1; 32]), "alice", 42, &cfg, None);
+        let b = derive_knock_spec(&MasterSecret::from_bytes([2; 32]), "alice", 42, &cfg, None);
         assert_ne!(a.knock_ports, b.knock_ports);
     }
 
@@ -543,7 +597,7 @@ mod tests {
         let (secret, cfg) = fixture();
         // Sweep many windows so we exercise both extremes of the ranges.
         for step in 0..2_000u64 {
-            let spec = derive_knock_spec(&secret, "alice", step, &cfg);
+            let spec = derive_knock_spec(&secret, "alice", step, &cfg, None);
             assert!(
                 spec.knock_ports.len() >= cfg.knock_count_min as usize
                     && spec.knock_ports.len() <= cfg.knock_count_max as usize,
@@ -569,7 +623,7 @@ mod tests {
         // The anti-duplicate rule must hold for every window we test.
         let (secret, cfg) = fixture();
         for step in 0..2_000u64 {
-            let spec = derive_knock_spec(&secret, "alice", step, &cfg);
+            let spec = derive_knock_spec(&secret, "alice", step, &cfg, None);
             for pair in spec.knock_ports.windows(2) {
                 assert_ne!(
                     pair[0], pair[1],
@@ -607,7 +661,7 @@ mod tests {
         cfg.knock_count_max = 14;
         cfg.validate().expect("count 14 must be allowed");
         let (secret, _) = fixture();
-        let spec = derive_knock_spec(&secret, "alice", 1, &cfg);
+        let spec = derive_knock_spec(&secret, "alice", 1, &cfg, None);
         assert_eq!(spec.knock_ports.len(), 14);
         // If we had indexed out of bounds this call would have panicked, so
         // reaching here *is* the assertion.
@@ -632,10 +686,130 @@ mod tests {
         assert_eq!(step_or_default(Some(15)), 15);
     }
 
+    // =======================================================================
+    // Source-address binding
+    //
+    // These tests pin the property that makes binding worth its cost: a
+    // sequence captured on the wire matches only when replayed from the same
+    // address. This is what defeats both passive replay and the active race.
+    // =======================================================================
+
+    /// A bound sequence must differ for every different source address.
+    ///
+    /// EXPERT: This is the whole mechanism. If two addresses derived the same
+    ///         sequence, a replay from either would match -- and the feature
+    ///         would be worthless while appearing to be on.
+    /// KID: Your front door gives a different secret knock than your friend's.
+    #[test]
+    fn binding_gives_each_address_its_own_sequence() {
+        let (secret, cfg) = fixture();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+
+        let sa = derive_knock_spec(&secret, "alice", 42, &cfg, Some(a));
+        let sb = derive_knock_spec(&secret, "alice", 42, &cfg, Some(b));
+        assert_ne!(
+            sa.knock_ports, sb.knock_ports,
+            "addresses must not share a sequence"
+        );
+        assert_ne!(sa.open_port, sb.open_port);
+    }
+
+    /// The bound and unbound derivations must differ.
+    ///
+    /// EXPERT: If `Some(ip)` and `None` produced the same output, binding would
+    ///         be a no-op. The distinct protocol labels guarantee this, and the
+    ///         test makes the guarantee explicit rather than implied.
+    #[test]
+    fn bound_and_unbound_differ() {
+        let (secret, cfg) = fixture();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let unbound = derive_knock_spec(&secret, "alice", 42, &cfg, None);
+        let bound = derive_knock_spec(&secret, "alice", 42, &cfg, Some(a));
+        assert_ne!(unbound.knock_ports, bound.knock_ports);
+    }
+
+    /// Binding must be deterministic for the same address.
+    #[test]
+    fn binding_is_deterministic() {
+        let (secret, cfg) = fixture();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let first = derive_knock_spec(&secret, "alice", 42, &cfg, Some(a));
+        let second = derive_knock_spec(&secret, "alice", 42, &cfg, Some(a));
+        assert_eq!(first, second);
+    }
+
+    /// IPv4 and IPv6 addresses must not collide.
+    ///
+    /// EXPERT: The family byte in the message exists to prevent an IPv4 address
+    ///         colliding with a prefix of an IPv6 address. This test is the guard
+    ///         on that byte. In practice an IPv4-mapped IPv6 address (`::ffff:10.0.0.1`)
+    ///         is the realistic collision candidate.
+    #[test]
+    fn ipv4_and_ipv6_do_not_collide() {
+        let (secret, cfg) = fixture();
+        let v4: IpAddr = "10.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        let s4 = derive_knock_spec(&secret, "alice", 42, &cfg, Some(v4));
+        let s6 = derive_knock_spec(&secret, "alice", 42, &cfg, Some(v6));
+        assert_ne!(s4.knock_ports, s6.knock_ports);
+    }
+
+    /// The bound message layout must be exactly as specified.
+    #[test]
+    fn bound_message_is_byte_exact() {
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let msg = knock_message("alice", 1, Some(a));
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(PROTOCOL_LABEL_IPBOUND);
+        expected.push(0x00);
+        expected.extend_from_slice(b"alice");
+        expected.push(0x00);
+        expected.extend_from_slice(&1u64.to_be_bytes());
+        expected.push(4); // IPv4 family byte
+        expected.extend_from_slice(&[10, 0, 0, 1]);
+
+        assert_eq!(msg, expected);
+    }
+
+    /// The unbound message must be unchanged from the original protocol.
+    ///
+    /// EXPERT: The whole point of the `Option` parameter is that the existing
+    ///         format is untouched when binding is off. This test is the
+    ///         backwards-compatibility guard: an existing client and server must
+    ///         keep interoperating with binding disabled.
+    #[test]
+    fn unbound_message_is_unchanged() {
+        let msg = knock_message("alice", 1, None);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(PROTOCOL_LABEL);
+        expected.push(0x00);
+        expected.extend_from_slice(b"alice");
+        expected.push(0x00);
+        expected.extend_from_slice(&1u64.to_be_bytes());
+        assert_eq!(msg, expected);
+    }
+
+    /// A bound sequence must still respect the configured ranges.
+    #[test]
+    fn bound_sequences_respect_ranges() {
+        let (secret, cfg) = fixture();
+        for i in 0..500u16 {
+            let ip: IpAddr = format!("10.0.{}.{}", i / 256, i % 256).parse().unwrap();
+            let spec = derive_knock_spec(&secret, "alice", 7, &cfg, Some(ip));
+            assert!(spec
+                .knock_ports
+                .iter()
+                .all(|p| cfg.knock_range.contains(*p)));
+            assert!(cfg.open_range.contains(spec.open_port));
+        }
+    }
+
     #[test]
     fn derive_with_hotp_uses_same_window() {
         let (secret, cfg) = fixture();
-        let (spec, code) = derive_with_hotp(&secret, "alice", 7, &cfg);
+        let (spec, code) = derive_with_hotp(&secret, "alice", 7, &cfg, None);
         assert_eq!(spec.time_step, 7);
         // The code must equal a direct HOTP call for the same counter.
         assert_eq!(code, hotp(secret.as_bytes(), 7, 6));

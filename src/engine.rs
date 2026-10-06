@@ -233,6 +233,26 @@ pub enum Outcome {
     },
 }
 
+/// The cache key for a derived spec: a time step, plus the bound address.
+///
+/// EXPERT: A named type alias rather than the bare tuple, which clippy's
+///         `type_complexity` lint rightly flags and which is genuinely easier to
+///         read. The `Option<IpAddr>` is `None` unless `bind_to_source_ip` is on;
+///         when it is `Some`, the expected sequence depends on the address and
+///         must never be shared between addresses.
+/// KID: A label for "which page of the book, for which front door".
+type SpecCacheKey = (u64, Option<IpAddr>);
+
+/// The derived specs for one cache key: every enrolled user's sequence.
+///
+/// EXPERT: `Vec` rather than a `HashMap<String, KnockSpec>` because the number of
+///         users is small and the engine iterates all of them on every packet
+///         anyway, so a linear scan over a `Vec` beats hashing a `String` key per
+///         user. The order is stable (`Keyring::iter_sorted`), which keeps logs
+///         and tests deterministic.
+/// KID: Everyone's taps for one page.
+type SpecCacheEntry = Vec<(String, KnockSpec)>;
+
 // ===========================================================================
 //  Per-IP bookkeeping
 // ===========================================================================
@@ -390,14 +410,15 @@ pub struct Engine {
     auth: AuthTable,
     /// Per-IP progress notes.
     states: HashMap<IpAddr, IpState>,
-    /// Cache of derived specs, keyed by time step.
+    /// Cache of derived specs, keyed by `(time step, bound source address)`.
     ///
-    /// EXPERT: `Vec<(String, KnockSpec)>` per step, holding every enrolled user's
-    ///         spec for that step. Rebuilt whenever a step we have not seen is
-    ///         requested, and pruned when steps leave the skew window. Bounded by
-    ///         `(2*skew+1)` entries regardless of traffic volume, so this cannot
-    ///         be grown by an attacker.
-    spec_cache: HashMap<u64, Vec<(String, KnockSpec)>>,
+    /// EXPERT: `Vec<(String, KnockSpec)>` per key, holding every enrolled user's
+    ///         spec for that key. Rebuilt whenever a key we have not seen is
+    ///         requested, and pruned when its step leaves the skew window. The
+    ///         address component is `None` unless `bind_to_source_ip` is on, in
+    ///         which case the expected sequence depends on the address and must
+    ///         not be shared between addresses (see `specs_for_step`).
+    spec_cache: HashMap<SpecCacheKey, SpecCacheEntry>,
 }
 
 impl Engine {
@@ -493,11 +514,22 @@ impl Engine {
     ///         `users * (2*skew+1)` candidates per packet. Without it, each
     ///         packet would cost that many HMACs; with it, the cost is paid once
     ///         per time step. The `entry` API is used to avoid a double lookup.
-    /// KID: "Have I already worked out everyone's taps for this page? If yes,
-    ///      use my notes; if no, work them out once and write them down."
-    fn specs_for_step(&mut self, step: u64) -> &[(String, KnockSpec)] {
-        // `entry(step)` gives us a slot we can fill only if it is vacant.
-        let entry = self.spec_cache.entry(step);
+    ///
+    /// **The cache key includes the source IP when binding is on.** That
+    ///         is essential: in bound mode the expected sequence depends on the
+    ///         address, so caching per step alone would serve one address's
+    ///         sequence to another -- a correctness bug and a security bug. In
+    ///         unbound mode the key is always `None`, so the cache behaves exactly
+    ///         as before. The cache therefore stays bounded by
+    ///         `(2*skew+1) * (distinct source IPs seen)`, which is bounded by
+    ///         traffic but pruned aggressively (see `prune_spec_cache`).
+    /// KID: "Have I already worked out everyone's taps for this page -- for this
+    ///      visitor's front door? If yes, use my notes; if no, work them out once."
+    fn specs_for_step(&mut self, step: u64, src_ip: Option<IpAddr>) -> SpecCacheEntry {
+        // The cache key is (step, bound address). See the doc comment for why the
+        // address must be part of the key.
+        let key = (step, src_ip);
+        let entry = self.spec_cache.entry(key);
         // `or_insert_with` computes the value lazily -- only if absent.
         let list = entry.or_insert_with(|| {
             // Derive for every user, in a stable order.
@@ -512,29 +544,35 @@ impl Engine {
                             name,
                             step,
                             &self.config,
+                            src_ip,
                         ),
                     )
                 })
                 .collect()
         });
-        // Return a slice. The borrow of `self.spec_cache` lasts as long as the
-        // returned slice, which the caller uses immediately.
-        list.as_slice()
+        // Return a clone. The spec cache is keyed by (step, ip), so we cannot
+        // return a borrow while also mutating `states` below. The clone is of a
+        // small struct (a short name, a handful of u16s), once per packet.
+        list.clone()
     }
 
     /// Drop cache entries for steps outside the current window.
     ///
-    /// EXPERT: Called from `observe` so the cache stays bounded at
-    ///         `2*skew+1` entries. Without this, a long-running daemon would
-    ///         accumulate one entry per 30-second window forever -- a slow leak
-    ///         proportional to uptime, which is exactly the kind of bug that only
-    ///         shows up after a month in production.
+    /// EXPERT: Called from `observe` so the cache stays bounded. In unbound mode
+    ///         that is `2*skew+1` entries; in bound mode it is that many per
+    ///         distinct source address seen in the window, which is why this
+    ///         pruning is a security control and not just tidiness -- an attacker
+    ///         can choose their apparent source address and thereby choose how
+    ///         many entries exist. The bound is "per address per live window",
+    ///         and the window is small, so the total is bounded by the number of
+    ///         addresses that send a knock-range packet in ~90 seconds.
     /// KID: Throw away recipe pages we no longer need, so the notebook does not
     ///      fill up.
     fn prune_spec_cache(&mut self, now: u64) {
         let keep = self.candidate_steps(now);
-        // `retain` keeps entries whose closure returns true.
-        self.spec_cache.retain(|step, _| keep.contains(step));
+        // `retain` keeps entries whose closure returns true. The key is now
+        // `(step, ip)`, so we compare the step component.
+        self.spec_cache.retain(|(step, _ip), _| keep.contains(step));
     }
 
     // -----------------------------------------------------------------------
@@ -607,20 +645,23 @@ impl Engine {
         let mut best: Option<(String, u64, usize, usize)> = None;
 
         for step in steps {
-            // Snapshot the specs for this step. We clone the *minimum* we need:
-            // the user name and the expected port. Cloning the whole `KnockSpec`
-            // would be wasteful, and holding a borrow would conflict with the
-            // `states` mutation below.
+            // Snapshot the specs for this step *and this source address*. In
+            // bound mode the expected sequence depends on the address, so we ask
+            // for the specs bound to `event.src_ip`; in unbound mode we pass
+            // `None` and the behaviour is unchanged.
             //
             // EXPERT: `specs_for_step` takes `&mut self`, so we cannot hold its
-            //         result across a `self.states` mutation. We therefore read
-            //         what we need into a local Vec first. This is the borrow
-            //         checker forcing a design that is also *faster*: one small
-            //         allocation instead of repeated map lookups.
+            //         result across a `self.states` mutation. It returns an owned
+            //         `Vec` for exactly that reason.
+            let bound_ip = if self.config.bind_to_source_ip {
+                Some(event.src_ip)
+            } else {
+                None
+            };
             let specs: Vec<(String, Vec<u16>, u16)> = self
-                .specs_for_step(step)
-                .iter()
-                .map(|(user, spec)| (user.clone(), spec.knock_ports.clone(), spec.open_port))
+                .specs_for_step(step, bound_ip)
+                .into_iter()
+                .map(|(user, spec)| (user, spec.knock_ports, spec.open_port))
                 .collect();
 
             for (user, ports, open_port) in specs {
@@ -956,7 +997,7 @@ mod tests {
         // wobble in the test cannot change the step.
         let now = 1_000_000u64; // step = 33333 (since 1_000_000 / 30 = 33333.33)
         let step = crate::crypto::time_step(now, config.step_seconds);
-        let spec = crate::crypto::derive_knock_spec(&known, "alice", step, &config);
+        let spec = crate::crypto::derive_knock_spec(&known, "alice", step, &config, None);
 
         let banlist = BanList::new(); // no persistence path: nothing touches disk
         let engine = Engine::new(keyring, config.clone(), banlist);
@@ -1121,7 +1162,8 @@ mod tests {
         // one window ahead).
         let next_step = f.step + 1;
         let known = crate::secret::MasterSecret::from_bytes([0x5a; 32]);
-        let next_spec = crate::crypto::derive_knock_spec(&known, "alice", next_step, &f.config);
+        let next_spec =
+            crate::crypto::derive_knock_spec(&known, "alice", next_step, &f.config, None);
 
         // Knocking that sequence now must still work, because step_skew = 1.
         for &p in &next_spec.knock_ports {
@@ -1141,7 +1183,7 @@ mod tests {
         // Two steps ahead is outside the ±1 window.
         let far_step = f.step + 2;
         let known = crate::secret::MasterSecret::from_bytes([0x5a; 32]);
-        let far_spec = crate::crypto::derive_knock_spec(&known, "alice", far_step, &f.config);
+        let far_spec = crate::crypto::derive_knock_spec(&known, "alice", far_step, &f.config, None);
 
         // The first knock should not match anything -> banned.
         let outcome = knock(&mut f.engine, addr, far_spec.knock_ports[0], f.now);
@@ -1194,6 +1236,7 @@ mod tests {
             "alice",
             crate::crypto::time_step(1_000_000, 30),
             &config,
+            None,
         );
         let wrong = (40_000u16..40_100)
             .find(|p| !spec.knock_ports.contains(p))
@@ -1264,6 +1307,7 @@ mod tests {
             "alice",
             crate::crypto::time_step(1_000_000, 30),
             &config,
+            None,
         );
         let wrong = (40_000u16..40_100)
             .find(|p| !spec.knock_ports.contains(p))
@@ -1333,6 +1377,7 @@ mod tests {
             "alice",
             step,
             &config,
+            None,
         );
         let wrong = (40_000u16..40_100)
             .find(|p| !spec.knock_ports.contains(p))
@@ -1594,6 +1639,7 @@ mod tests {
             "alice",
             crate::crypto::time_step(now, cfg.step_seconds),
             &cfg,
+            None,
         );
         for &p in &spec.knock_ports {
             let _ = engine.observe(KnockEvent {
@@ -1624,5 +1670,180 @@ mod tests {
         // Check well after the observation, and at a later time.
         assert!(!engine.banlist().is_banned(addr, now));
         assert!(!engine.banlist().is_banned(addr, now + 10_000));
+    }
+
+    // =======================================================================
+    // Source-address binding, end to end through the state machine
+    // =======================================================================
+
+    /// Build an engine with binding enabled.
+    fn engine_with_binding() -> (Engine, ServerConfig, u64) {
+        let mut config = ServerConfig::default();
+        config.knock_range = PortRange::new(40_000, 40_099).unwrap();
+        config.open_range = PortRange::new(50_000, 50_009).unwrap();
+        config.knock_count_min = 3;
+        config.knock_count_max = 3;
+        config.bind_to_source_ip = true;
+        config.ban_fail_threshold = 5;
+        config.ban_window_seconds = 3600;
+        config.ban_ttl_seconds = 0;
+        config.validate().expect("binding config must be valid");
+        let now = 1_000_000u64;
+        (
+            Engine::new(test_keyring(), config.clone(), BanList::new()),
+            config,
+            now,
+        )
+    }
+
+    /// The address that knocked must be authorised.
+    #[test]
+    fn bound_knock_authorises_the_knocking_address() {
+        let (mut engine, config, now) = engine_with_binding();
+        let alice_ip = ip(203, 0, 113, 5);
+
+        let spec = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            crate::crypto::time_step(now, config.step_seconds),
+            &config,
+            Some(alice_ip),
+        );
+        for &p in &spec.knock_ports {
+            let _ = engine.observe(KnockEvent {
+                src_ip: alice_ip,
+                dst_port: p,
+                at: now,
+            });
+        }
+        assert!(
+            engine.auth().is_open(alice_ip, now),
+            "the address that knocked correctly must be authorised"
+        );
+    }
+
+    /// THE replay test: the same sequence from a *different* address must fail.
+    ///
+    /// EXPERT: This is the entire point of binding. An attacker who captured
+    ///         Alice's sequence replays it from their own address; the server
+    ///         derives the expectation for *their* address, which is a different
+    ///         sequence, so nothing matches. Compare with the unbound mode, where
+    ///         this replay would succeed (until the burn lands).
+    /// KID: Copying your friend's knock and trying it at your own front door does
+    ///      not work, because your door has a different knock.
+    #[test]
+    fn bound_sequence_replayed_from_another_address_fails() {
+        let (mut engine, config, now) = engine_with_binding();
+        let alice_ip = ip(203, 0, 113, 5);
+        let attacker_ip = ip(198, 51, 100, 66);
+
+        // Alice's sequence, captured by the attacker.
+        let alice_spec = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            crate::crypto::time_step(now, config.step_seconds),
+            &config,
+            Some(alice_ip),
+        );
+
+        // The attacker replays it from their own address.
+        for &p in &alice_spec.knock_ports {
+            let _ = engine.observe(KnockEvent {
+                src_ip: attacker_ip,
+                dst_port: p,
+                at: now,
+            });
+        }
+
+        // The attacker must NOT be authorised.
+        assert!(
+            !engine.auth().is_open(attacker_ip, now),
+            "a replayed sequence from another address must not authorise"
+        );
+        // And Alice's own grant was never created by the replay.
+        assert!(!engine.auth().is_open(alice_ip, now));
+    }
+
+    /// The spec cache must not serve one address's sequence to another.
+    ///
+    /// EXPERT: This is the subtle bug the cache key change prevents. If the cache
+    ///         were keyed by step alone, the first address to knock would
+    ///         populate it, and the second address would be checked against the
+    ///         *first* address's sequence -- so binding would silently do nothing
+    ///         for every address after the first. This test exercises two
+    ///         addresses in the same step, in order, which is exactly the
+    ///         sequence of events that would expose it.
+    /// KID: Make sure the notebook keeps separate pages for different front
+    ///      doors, not one page everyone shares.
+    #[test]
+    fn spec_cache_does_not_leak_between_addresses() {
+        let (mut engine, config, now) = engine_with_binding();
+        let step = crate::crypto::time_step(now, config.step_seconds);
+
+        // Address A knocks correctly first, populating any cache.
+        let a = ip(203, 0, 113, 10);
+        let spec_a = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            step,
+            &config,
+            Some(a),
+        );
+        for &p in &spec_a.knock_ports {
+            let _ = engine.observe(KnockEvent {
+                src_ip: a,
+                dst_port: p,
+                at: now,
+            });
+        }
+        assert!(engine.auth().is_open(a, now));
+
+        // Address B knocks correctly second, in the same step.
+        let b = ip(203, 0, 113, 11);
+        let spec_b = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            step,
+            &config,
+            Some(b),
+        );
+        for &p in &spec_b.knock_ports {
+            let _ = engine.observe(KnockEvent {
+                src_ip: b,
+                dst_port: p,
+                at: now,
+            });
+        }
+        assert!(
+            engine.auth().is_open(b, now),
+            "the second address must be checked against its own sequence, \
+             not the first address's cached one"
+        );
+
+        // The two sequences must genuinely differ, or this test proves nothing.
+        assert_ne!(spec_a.knock_ports, spec_b.knock_ports);
+    }
+
+    /// With binding off, the old behaviour must be exactly preserved.
+    #[test]
+    fn unbound_mode_still_authorises() {
+        let (mut engine, _config, now) = engine_with_rate_limit(5, 3600);
+        let addr = ip(203, 0, 113, 20);
+        let cfg = engine.config().clone();
+        let spec = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            crate::crypto::time_step(now, cfg.step_seconds),
+            &cfg,
+            None,
+        );
+        for &p in &spec.knock_ports {
+            let _ = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: p,
+                at: now,
+            });
+        }
+        assert!(engine.auth().is_open(addr, now));
     }
 }
