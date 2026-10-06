@@ -417,6 +417,22 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
   "service authentication failed from that same IP" is a strong forged-knock
   signal. The daemon cannot see this alone — it opens a hole and its knowledge
   ends there — so it needs the two log sources joined outside the daemon.
+- [ ] **Known edge case: an open IP is exempt from the rate limiter (low).**
+  `Engine::observe` returns early for an IP that already has a port open, and
+  that return happens *before* failure counting. So for the duration of its
+  window, an authorised IP can send unlimited knock-range packets that match
+  nothing without accumulating a single failure.
+  - **Not exploitable.** Reaching the open state requires a valid knock first, so
+    this only applies to an IP that has already authenticated. The worst case is
+    an authenticated user who is also probing, and their traffic is already
+    attributable.
+  - **It is a deliberate trade, not an oversight.** The same early return is what
+    stops a just-authorised user being banned by stray knock-range traffic —
+    without it, the daemon could ban the very user it just let in. Protecting the
+    legitimate case is worth the coverage gap.
+  - Recorded so it is known rather than discovered. A future version could count
+    failures for open IPs but hold them below the threshold, or apply a separate
+    higher limit.
 - [ ] **Per-device keys with an enrolment registry (medium).** Today a key is
   per-user, so "Alice's key" cannot be told apart from "Alice's key copied to
   another machine". One key per *registered device* turns that into an anomaly
