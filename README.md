@@ -465,6 +465,33 @@ door; the service still asks for ID. That layering is the point — a knock-secr
 compromise is survivable precisely because sshd (or whatever is behind the port)
 asks for something the attacker does not have.
 
+### 11.1 On "AI can hack anything"
+
+This gets asked a lot, so it is worth an explicit answer. The short version: AI
+does not change the mathematics, and it does not change what an attacker needs.
+It changes the *cost* of finding and chaining mistakes, which is a real shift but
+a different one from "everything is now hackable".
+
+What actually protects a system, and where OTKP sits:
+
+| Attack | Does OTKP help? | Why |
+|---|---|---|
+| Automated scanning for open ports | **Yes, fully** | There is nothing to find. No port answers, so there is nothing to fingerprint or to match against a CVE database. This is the single biggest win and it is not a small one. |
+| Automated exploitation of a known CVE in the protected service | **Yes, while the knock is intact** | The attacker cannot reach the service to send the exploit. This is the "concealment defeats the reconnaissance phase" argument, and it is the strongest reason to run something like this. |
+| AI-assisted source review of *your* code | **No** | An LLM reading this repo will find real issues faster than a human will. That is an argument for keeping the code small, auditable and honest about its gaps — which is what §10 and this section are for. |
+| Phishing or social-engineering the secret | **No** | The secret is the whole boundary, and it lives on a client. AI makes convincing phishing cheaper. This is the most likely real-world failure, and no amount of knock cleverness fixes it. |
+| An on-path attacker who can read your traffic | **Partially** | They can race a replay until the `src_ip` binding lands. They cannot derive future sequences (HMAC is one-way), so their capability is bounded to one window, one shot. |
+| Compromised client with a valid key | **No** | A machine that holds the key *is* an authorised user as far as the protocol can tell. |
+| Supply-chain compromise in a dependency | **No** | Out of scope. Mitigated only by keeping the dependency list short (see `Cargo.toml`). |
+
+The honest summary: **OTKP removes the entire opportunistic tier** — the scanners,
+the mass CVE exploitation, the bots — and does essentially nothing against a
+targeted attacker who can phish you, sit on your network, or own your laptop.
+
+That is worth having. Removing the opportunistic tier is what most real-world
+"we got breached" stories are made of. But it is not the same as being unhackable,
+and any system that claims to be is one you should trust less, not more.
+
 ---
 
 ## License
