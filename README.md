@@ -4,7 +4,7 @@
 
 # otkp — One Time Knock Protocol
 
-**Nothing to scan. One knock to open it. One address. One window.**
+**Nothing to scan. A new knock and a new port every window — and each sequence works exactly once.**
 
 > **Status: alpha (v0.1.0).** Unaudited, not deployed, and the layered
 > authorisation architecture in
