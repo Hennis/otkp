@@ -83,11 +83,11 @@ pub struct Decoy {
 ///         attention — but the version strings are inert text. See the module
 ///         docs.
 ///
-///         **The ports are deliberately NOT the canonical ones, and the first
+/// **The ports are deliberately NOT the canonical ones, and the first
 ///         version of this catalogue got that wrong.** Two reasons, both found
 ///         by running it:
 ///
-///           1. **Privileged ports need root.** 22 and 80 are below 1024, so
+/// 1. **Privileged ports need root.** 22 and 80 are below 1024, so
 ///              binding them requires privileges the decoy daemon has no reason
 ///              to hold. A decoy that needs root to start is a decoy that gets
 ///              run as root, which is a worse outcome than the one it prevents.
@@ -96,12 +96,12 @@ pub struct Decoy {
 ///              rest of this architecture exists to protect. A decoy there
 ///              either fails to bind or shadows the real service.
 ///
-///         So each decoy sits on the *alternate* port that its service
+/// So each decoy sits on the *alternate* port that its service
 ///         conventionally uses, which is plausible to a scanner, unprivileged,
 ///         and unlikely to collide. The banner is what makes a decoy attractive;
 ///         the port merely has to be open and enumerable.
 ///
-///         Operators who want different ports should override them rather than
+/// Operators who want different ports should override them rather than
 ///         edit this list — see `--port` in the binary's help.
 /// KID: The shelf of pretend doors. We deliberately do NOT put them on the
 ///      numbers the real doors use, because the real doors are right there and
