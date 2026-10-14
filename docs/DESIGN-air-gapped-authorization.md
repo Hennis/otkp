@@ -179,33 +179,93 @@ look unusual.
 
 ---
 
-## 5. Why not a blockchain
+## 5. On using a ledger for authorisation
 
-A blockchain is a **hash chain plus distributed consensus**. The hash chain gives
-tamper-evidence; the consensus gives agreement among parties who do not trust
-each other.
+The shape under discussion pre-commits authorisations — "subject S may knock
+during window W" — to a ledger, and the verifier accepts a knock only once the
+authorising entry is confirmed.
 
-- **If you control who may write** ("only authorised parties validate"), you have
-  removed the consensus. There is nothing to agree on. What remains is a hash
-  chain — a *data structure*, implementable in fifty lines over any database.
-- **If you need agreement among mutually distrusting organisations**, that is a
-  consortium, and it begins as an organisational agreement — governance,
-  membership, liability, dispute resolution. No code bootstraps it.
-- **If the goal is auditability**, a transparency log (§3.3) gives strictly more:
-  tamper-evidence plus cryptographic proofs, without consensus, mining, or a
-  chain, and orders of magnitude faster.
+Two of the usual objections do **not** apply to that shape, and it is worth
+saying so plainly:
 
-**And never put the authorization decision behind a chain read.** Two concrete
-reasons, both fatal to an access-control gate:
+- **Latency.** Because the authorisation is *pre-committed*, the confirmation
+  wait happens before access is needed, not at the moment of it. The knock's
+  30-second window is therefore not in tension with block times. This is a real
+  property of pre-commitment and it deserves credit.
+- **Reorganisation.** Waiting for N confirmations before treating an entry as
+  final is the standard mitigation and the correct one. An entry N blocks deep is
+  not realistically reorged. "A certain time after the block is accepted" is
+  exactly this, and it is the right answer.
 
-- **Availability.** If the chain is unreachable, partitioned, or rate-limiting
-  you, nobody authenticates. Every such design eventually has that outage.
-- **Reorganisations.** A chain can retroactively drop a block. An authorisation
-  you already acted on can become "not on the chain" after the fact — you granted
-  access based on a fact that later stopped being true.
+Two things remain. They are not objections to the idea; they are decisions that
+have to be made explicitly, because the design is ambiguous without them.
 
-A public chain also publishes your access patterns permanently and correlatably.
-That is the opposite of what a concealment layer is for.
+### 5.1 Either the verifier caches, or it has an availability dependency
+
+There is no third option, and this is the crux:
+
+- **If the verifier caches the authorisation locally**, then the ledger is a
+  *distribution mechanism* for authorisations — it gets them from the signer to
+  the verifier once. But a signed token does that job better: it is
+  self-verifying, needs no ledger liveness, and needs no confirmation wait. The
+  ledger would then be a slower, more complex transport for something a
+  signature already provides.
+- **If the verifier reads the ledger at knock time**, then ledger availability
+  gates every access. An unreachable, partitioned, or rate-limiting ledger means
+  nobody authenticates. Every design of this shape eventually has that outage.
+
+Pick one and write down why. The common answer is "cache, and treat the ledger as
+the record" — which is fine, but it means the ledger is an *audit* mechanism, not
+an authorisation mechanism, and §3.3 is the relevant part.
+
+### 5.2 If the ledger authorises, the knock stops authorising
+
+If acceptance depends on an entry saying "S may knock during W", then the knock
+secret is no longer what grants access — anyone could knock. The knock becomes
+**concealment only**.
+
+That is a legitimate architecture; concealment and authorisation are different
+properties and separating them is often the right call. But it changes what the
+knock is *for*, and it means the knock secret no longer needs to be secret.
+Decide which of these you mean:
+
+- **Knock authorises, ledger records.** The knock is the boundary; the ledger is
+  audit. §3.3 applies, and a transparency log is the right tool.
+- **Ledger authorises, knock conceals.** The ledger is the boundary and needs the
+  §5.1 answer; the knock hides the port, and its secret can be published without
+  weakening authorisation.
+
+Having *both* authorise is two mechanisms for one job, with the weaker one still
+in the path.
+
+### 5.3 When a permissioned ledger is the right choice
+
+A permissioned ledger earns its cost in exactly one situation: **several mutually
+distrusting organisations must all write to one shared, ordered, tamper-evident
+log, with no central operator.**
+
+That is a consortium, and it is an organisational decision before it is a
+technical one — governance, membership, liability, and dispute resolution all
+have to exist first. No code bootstraps it. This is why permissioned ledgers in
+the wild (trade finance, interbank settlement) all began as organisations that
+added a ledger, not the reverse.
+
+If a **single party** writes the authorisations, the consensus the ledger existed
+to provide has been removed, and what remains is a hash chain: a data structure,
+implementable over any database. A transparency log (RFC 6962; Trillian as a
+library) gives tamper-evidence plus inclusion proofs without consensus, and is
+orders of magnitude faster.
+
+So the question to answer is not "chain or no chain" but: **who writes the
+authorisations, and do they trust each other?**
+
+### 5.4 If the ledger is public
+
+A public ledger publishes every authorisation permanently and correlatably — who
+may access what, and when, for all time. For a system whose point is concealment,
+that is the opposite of the goal. It may still be a deliberate trade, but it
+should be a deliberate one.
+
 
 ---
 
@@ -260,11 +320,15 @@ Stated plainly, because a control that oversells itself stops being monitored.
 | Authorisation | Signed token, verified locally | Verification needs a public key, not a ledger |
 | Replay protection | Nonce/counter + audience + window | — |
 | Audit | Merkle transparency log | Tamper-evidence without consensus |
+| Multi-party authorisation | Permissioned ledger — *only* if several mutually distrusting orgs all write (§5.3) | — |
 | Concealment | The knock protocol (separate) | — |
 
-Three rules, if you remember nothing else:
+Four rules, if you remember nothing else:
 
-1. Verify locally. Never gate authorisation on a network round-trip.
-2. Display semantics. A hash the user cannot read is not a control.
-3. Separate keys per purpose. One seed, many derived keys — never one key, many
+1. Decide the §5.1 question explicitly: does the verifier cache, or does it
+   depend on the ledger being up? There is no third option.
+2. Decide the §5.2 question explicitly: does the knock authorise, or only
+   conceal? Two authorisers for one job means the weaker one is still in the path.
+3. Display semantics. A hash the user cannot read is not a control.
+4. Separate keys per purpose. One seed, many derived keys — never one key, many
    purposes.

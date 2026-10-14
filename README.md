@@ -357,9 +357,10 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
 - [`docs/DESIGN-air-gapped-authorization.md`](docs/DESIGN-air-gapped-authorization.md)
   — authorising access with an air-gapped signing key, and why that component is
   deliberately *separate* from this daemon (its key must be offline; the knock
-  secret must be online). Includes the confused-deputy requirement, the
-  transparency-log alternative to a blockchain, and what an air gap does not
-  protect against.
+  secret must be online). Includes the confused-deputy requirement, the two
+  questions a ledger-based authorisation has to answer (cache-vs-dependency, and
+  whether the knock still authorises), when a permissioned ledger is genuinely
+  the right choice, and what an air gap does not protect against.
 
 ### Security gaps, in priority order
 
