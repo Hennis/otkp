@@ -300,6 +300,33 @@ legitimate users *and* stop recording. A deployment with a regulatory obligation
 to never lose a record should call `AuditLog::write` directly and treat the error
 as fatal — the API allows that; the daemon does not choose it.
 
+#### Levels 3 and above — designed, not built
+
+The ladder is meant to continue, but only as far as an operator's threat model and
+budget justify. The rungs above 2 are designed in
+[`docs/DESIGN-air-gapped-authorization.md`](docs/DESIGN-air-gapped-authorization.md)
+and are deliberately **not implemented** — shipping a level that does not deliver
+its assurance would be exactly the kind of claim this project refuses to make.
+
+| Level | Name | Would buy | Would cost | Status |
+|---|---|---|---|---|
+| 3 | `layered` | A second factor behind the knock (VPN handshake or signed token), so a knock-secret compromise exposes a port but does not grant access | A second component to run, key and monitor; a tunnel-aware session lifetime instead of a fixed TTL | Designed |
+| 4 | `attested` | Pre-committed, multi-party attestations on a shared ledger: access is permitted only once several parties have agreed it *and* the ledger confirms | A consortium, an air-gapped root CA with threshold signing, a participation agreement, and named liability | Designed |
+
+Two things worth saying plainly about level 4, because it is the rung people
+reach for first and should not:
+
+- **It is not primarily an engineering step.** It needs a consortium to exist —
+  governance, membership, liability, dispute resolution — and no code bootstraps
+  one. The technical design is the easy half.
+- **It only pays for itself if several mutually distrusting parties must *agree*,
+  not merely verify.** A single writer needs a signed record and a transparency
+  log, not consensus. See the design note §5.3 for the deciding question.
+
+The ordering principle is unchanged from levels 0–2: each rung names an assurance
+and its cost, and an operator climbs only when their threat model or their
+regulator says so.
+
 ---
 
 ## 7. Two ways to watch for knocks (`--source`)
@@ -427,6 +454,13 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
   permissioned ledger is genuinely the right choice (several mutually distrusting
   parties must *agree*, not merely verify), and what an air gap does not protect
   against.
+- [`docs/DESIGN-deception-layer.md`](docs/DESIGN-deception-layer.md) — a **future
+  project**, not part of this one: attracting automated attackers into wasting
+  resources on decoys. Records what is sound (tarpits, honeytokens, canary
+  markers), what is dangerous (real vulnerable software as bait is a real
+  foothold; decoy services are attack surface), and why AI-generated decoy files
+  are the weakest part of the idea — templates are cheaper and the value is in
+  the canary markers, not the realism.
 
 ### Security gaps, in priority order
 
