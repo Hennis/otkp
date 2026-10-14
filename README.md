@@ -4,6 +4,8 @@
 
 # otkp — One Time Knock Protocol
 
+**Nothing to scan. One knock to open it. One address. One window.**
+
 > **Status: alpha (v0.1.0).** Unaudited, not deployed, and the layered
 > authorisation architecture in
 > [`docs/DESIGN-air-gapped-authorization.md`](docs/DESIGN-air-gapped-authorization.md)
