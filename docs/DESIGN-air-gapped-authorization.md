@@ -38,7 +38,7 @@ them apart:
 | Remote attacker cannot steal the signing key | **Yes, fully** |
 | Remote attacker cannot *use* the system | No |
 | Authorisation cannot be forged without the key | Yes |
-| The online host cannot trick the user into signing something else | **No — see §4** |
+| The online host cannot trick the user into signing something else | **Yes, if the device originates the request — see §4** |
 
 ---
 
@@ -75,8 +75,10 @@ the design honest — collapsing any two is where these systems usually go wrong
 
 The flow:
 
-1. **Pre-authorize, offline.** The air-gapped device signs an attestation —
-   subject, service, validity window, nonce. Several parties commit it to the
+1. **Pre-authorize, offline.** The user originates the request **on** the
+   air-gapped device — selecting the purpose from a closed menu — which builds and
+   signs the attestation: subject, service, validity window, nonce. The device
+   receives nothing from the network side (§4.3). Several parties commit it to the
    ledger. Wait N confirmations before treating it as final.
 2. **Knock.** The client derives the OTP-style sequence and the auth-port number.
    The server consults its view of the ledger; with no valid attestation, it
@@ -212,29 +214,80 @@ queue the record.
 
 ---
 
-## 4. The failure mode that decides whether any of this works
+## 4. The failure mode, and the fix that removes it
 
-The online host constructs the request. The offline device signs it. So the
-**compromised** machine chooses what gets signed, and the air gap is defeated
-unless the human verifies the semantics on the offline device's own display.
+The naive shape has the **online host construct the request** and the offline
+device sign it. That is the confused deputy: the compromised machine chooses what
+gets signed, and the air gap is defeated unless the human reads the offline
+device's display carefully, every single time.
 
-Concretely: the attacker's payload says "authorise access to host-42" in the
-field the online host displays, while the bytes actually signed say something
-else. If the user scans and confirms without reading, they have signed whatever
-the attacker wanted.
+Concretely: the attacker's request says "authorise access to host-42" on the screen
+the user is looking at, while the bytes actually signed authorise something else.
+A user who scans and confirms without reading has signed whatever the attacker
+wanted — and the audit record will show a genuine signature by the victim.
 
-Three requirements follow, and none are optional:
+### 4.1 The fix: make the offline device the originator, not the signer
 
-1. **The offline device displays semantic content**, in words the user can check.
-2. **The token is non-replayable** (nonce/counter, and `audience` + validity
-   window). Otherwise an old signature is reused indefinitely.
-3. **The online host is treated as hostile.** It is the attacker's foothold.
+Do not send a request *to* the offline device. Let the user originate the request
+*on* it.
 
-The security boundary here is a human reading a screen. That is a weaker
-boundary than a cryptographic guarantee, and it degrades with habituation — a
-user who signs ten times a day stops reading. Design for that: make the display
-short, make the important field visually dominant, and make unusual requests
-look unusual.
+1. The user selects the purpose on the offline device itself (see §4.2).
+2. The offline device constructs the token and signs it.
+3. It displays the token as a QR.
+4. The online side scans and submits it. It never constructs anything.
+
+Now there is nothing to confuse. The compromised host has no say in what was
+requested, so it cannot ask for one thing while obtaining another. This does not
+make the confused deputy *harder* — it removes the class.
+
+### 4.2 A closed vocabulary
+
+The device signs only purposes from a fixed, pre-provisioned list. It cannot be
+asked to sign arbitrary content, because it does not accept content — it accepts a
+*selection* from a menu it already knows.
+
+This is what stops "just sign this one thing for me" from working. The attacker
+can at most induce the user to choose a legitimate but unwanted option from the
+list.
+
+### 4.3 One-way by construction
+
+If the device originates requests, it never needs to receive anything from the
+network side. The QR flow becomes one-directional: **offline → online only.**
+
+Worth stating as a property rather than an implementation detail: **the offline
+device has no input channel from the attacker's foothold.** There is no data path
+by which the compromised host can influence it. The air gap becomes a diode.
+
+### 4.4 What remains
+
+Two things, stated honestly.
+
+- **Social engineering within the menu.** The attacker cannot forge a request, but
+  they can try to talk the user into selecting the wrong option — "select 'rotate
+  credentials', we need it for the audit". The deception surface shrinks from
+  *anything at all* to *the legitimate menu items*. A large reduction, not zero.
+- **Denial of service.** The compromised host can decline to forward a valid
+  token. It cannot forge one.
+
+### 4.5 The requirements that still apply
+
+1. **The offline device displays semantic content** — what it is about to sign, in
+   words the user can check. With §4.1 this becomes a *confirmation of the user's
+   own selection*, which is far easier to verify than an unfamiliar request
+   arriving from elsewhere.
+2. **The token is non-replayable** — nonce/counter, plus `audience` and validity
+   window.
+3. **The online host is treated as hostile.** It can now only deny or forward. It
+   cannot authorise.
+
+### 4.6 The cost
+
+A few more button presses on the offline device per authorisation. In exchange, a
+control that depended on human vigilance is replaced by one that depends on the
+device having no input channel.
+
+That is a good trade, and it is the single highest-value change to this design.
 
 ---
 
@@ -501,8 +554,10 @@ not one key with two purposes. Same device, same backup, different key bytes.
 Stated plainly, because a control that oversells itself stops being monitored.
 
 - **A compromised offline device**, including supply chain. Nothing here helps.
-- **A user who does not read the display.** The confused deputy (§4). This is the
-  most likely real-world failure.
+- **A user who does not read the display.** The confused deputy — *structurally
+  removed* by §4.1, provided the device originates the request and signs only from
+  a closed menu (§4.2). The residual is social engineering *within* the menu: the
+  user can still be talked into selecting a legitimate but unwanted option.
 - **Physical access to the offline device.** That is physical security.
 - **An online host that is compromised.** It cannot forge authorisations, but it
   can deny service, replay within the validity window if nonces are mishandled,
@@ -533,19 +588,21 @@ Stated plainly, because a control that oversells itself stops being monitored.
 | Concealment **and** authentication (opens the keyhole, identifies the subject) | The knock protocol (separate; per-user, per-use) | — |
 | Who agreed to access, and when | Attestation: signed record, or shared ledger if several mutually distrusting parties must agree (§5.3) | A single writer needs a transparency log, not consensus |
 
-Six rules, if you remember nothing else:
+Seven rules, if you remember nothing else:
 
 1. **The knock conceals and authenticates; it does not authorise.** It opens the
    keyhole. Keep the layers separate, and note that the built daemon currently has
    only this first layer — the distinction is a target, not a current property
    (§5.2, §2.2).
-2. **Every party must attest something no other party can.** If two attest the
+2. **The offline device originates; it does not merely sign.** A signer can be
+   confused; an originator with a closed menu and no input channel cannot (§4).
+3. **Every party must attest something no other party can.** If two attest the
    same fact, one is redundant. The party with no stake in the grant is the one
    that makes "several parties agree" mean anything (§5.3.2).
-3. **Liability follows the attestation.** Several, not joint, bonded, under one
+4. **Liability follows the attestation.** Several, not joint, bonded, under one
    instrument, with a named arbiter for disputes (§5.3.3).
-4. **Decide the §5.1 question explicitly:** does the verifier cache, or does it
+5. **Decide the §5.1 question explicitly:** does the verifier cache, or does it
    depend on the ledger being up? There is no third option.
-5. **Display semantics.** A hash the user cannot read is not a control.
-6. **Separate keys per purpose.** One seed, many derived keys — never one key,
+6. **Display semantics.** A hash the user cannot read is not a control.
+7. **Separate keys per purpose.** One seed, many derived keys — never one key,
    many purposes.
