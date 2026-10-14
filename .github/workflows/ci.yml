@@ -68,14 +68,25 @@ jobs:
 
       # Lints must be clean. `-D warnings` turns any clippy warning into a
       # failure, which is what keeps the tree clean over time.
+      #
+      # NOTE the `--workspace` on every cargo command below, and note that it
+      # was missing once: without it, cargo operates on the *current package*
+      # only, so the `decoy` crate was neither linted, tested, nor built. A
+      # broken decoy crate would have passed CI green -- which is the worst kind
+      # of green, because it is a claim of coverage that is not true.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # The tests. `--all-targets` includes the integration tests in tests/.
+      # The tests. `--workspace` covers every crate, and it is deliberately NOT
+      # combined with `--all-targets`: that flag means `--lib --bins --tests
+      # --benches --examples`, which EXCLUDES doctests. Measured on this tree:
+      # `--workspace` runs 307 tests, `--workspace --all-targets` runs 305. Two
+      # tests is not many, but a coverage flag that silently drops a category is
+      # the same class of mistake as a CI step that skips a crate.
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --workspace
 
       # A release build, to catch anything that only breaks with LTO or
       # panic=abort (both of which we enable in Cargo.toml).
       - name: Release build
-        run: cargo build --release
+        run: cargo build --workspace --release

@@ -934,5 +934,8 @@ not adjudicate motive.
 
 ## License
 
-Dual-licensed under either of **MIT** or **Apache-2.0**, at your option — the
-standard Rust convention.
+**MIT.** See [`LICENSE-MIT`](LICENSE-MIT).
+
+(The Rust convention is dual `MIT OR Apache-2.0`, which is what this project
+declared until an audit noticed that only the MIT text was actually present. The
+declaration now matches the file.)

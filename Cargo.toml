@@ -41,8 +41,12 @@ rust-version = "1.74"
 # One-line human description (shows up in `cargo metadata` and on crates.io).
 description = "One Time Knock Protocol (OTKP): OTP-style, time-based, one-time port-knock sequences that open a per-user port, with instant banning of failed knockers."
 
-# SPDX license expression. `MIT OR Apache-2.0` is the Rust-ecosystem convention.
-license = "MIT OR Apache-2.0"
+# SPDX license expression. The Rust-ecosystem convention is `MIT OR Apache-2.0`,
+# but that is only honest if BOTH texts ship -- and only LICENSE-MIT exists here.
+# A licence field naming a file the repository does not contain is the kind of
+# small inconsistency that makes a reviewer distrust everything else, so the
+# field matches what is actually present.
+license = "MIT"
 
 # Where the docs live. Cargo shows this on crates.io.
 readme = "README.md"
