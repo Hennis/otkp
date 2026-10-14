@@ -326,16 +326,17 @@ There is no third option, and this is the crux:
   gates every access. An unreachable, partitioned, or rate-limiting ledger means
   nobody authenticates. Every design of this shape eventually has that outage.
 
-Pick one and write down why. **For this design the answer is "cache"**, and it is
-a good fit: the attestations are *pre-committed*, so the verifier can hold the
-subset that concerns it and refresh it, with a short TTL to pick up revocations.
-That keeps ledger availability off the critical path while still letting the
-ledger be the shared record of agreement.
+Pick one and write down why. **For this design the answer is "cache" — and since
+§5.5 air-gaps the CA, it is not a preference but a forced consequence.** The
+attestations are *pre-committed*, so the verifier holds the subset that concerns
+it and refreshes it on the cycle, with a short TTL to pick up revocations. Ledger
+availability stays off the critical path while the ledger remains the shared
+record of agreement.
 
 The trade to be explicit about: a cached attestation is trusted locally until the
-TTL expires, so a *revocation* takes up to one TTL to take effect. Choose the TTL
-as a deliberate security parameter, not a performance knob, and write down the
-worst-case revocation delay.
+TTL expires, so a *revocation* takes up to one TTL to take effect. And because the
+CA is offline, that TTL cannot be shorter than the cycle — see §5.5.2, where
+window length is the revocation SLA.
 
 ### 5.2 The knock does not authorise — it opens the keyhole
 
@@ -527,6 +528,93 @@ may access what, and when, for all time. For a system whose point is concealment
 that is the opposite of the goal. It may still be a deliberate trade, but it
 should be a deliberate one.
 
+### 5.5 The central authority: offline, and distributed
+
+The CA resolves to two properties, and both follow from one requirement: **no
+single party should be able to authorise or deanonymise on its own.**
+
+#### 5.5.1 Offline — the CA is never in the online path
+
+The CA is air-gapped, so it cannot be consulted during an access. It therefore
+cannot answer "is this within the window?" — the verifier answers that from
+material the CA issued in advance.
+
+This is the **offline root CA pattern**: a root that signs grants periodically,
+with the grants doing the work online.
+
+Consequences:
+
+- **No availability dependency.** The CA being offline, down, or absent does not
+  block access. This settles §5.1 in favour of caching — it is not a preference,
+  it is forced.
+- **No real-time observation.** The CA does not see accesses as they happen. A
+  privacy gain and a detection loss, and both are worth naming.
+- **Issuance is batched.** The CA acts in cycles, not on demand. Access must be
+  planned, not granted impulsively. A real operational constraint, not a defect.
+
+#### 5.5.2 The revocation answer is short windows
+
+An air-gapped CA cannot revoke live. Revocation requires a cycle: sign, transport,
+distribute.
+
+The resolution is not fast revocation — it is **short validity windows.** Revoking
+means declining to renew, so the worst-case revocation delay is the *window*
+length, not the cycle length.
+
+Design constraint: **cycle length ≤ window length.** The window length *is* the
+revocation SLA, and should be chosen as one rather than discovered as one.
+
+#### 5.5.3 Distributed — threshold signing
+
+Air-gapping protects the CA's keys from remote compromise. It does not protect
+against physical seizure, supply chain, or compulsion — and the CA holds three
+roots: validator admission, identity mapping, and window decryption.
+
+Split the CA's signing key **k-of-n** across n parties, requiring k to co-sign.
+Then:
+
+- No single device can issue an attestation.
+- No single party can deanonymise a subject.
+- Seizure or subpoena of one share is insufficient.
+- The shares can each sit on their own offline device, so air-gapping composes
+  rather than conflicts.
+
+Cost: one more ceremony per cycle, and share custody is real operational burden —
+who holds them, where, under what controls, and what happens when a holder leaves.
+Suggested starting point: **3-of-5**, which survives one loss and one absence
+without making collusion easy.
+
+#### 5.5.4 The four parameters that *are* the design
+
+| Parameter | Meaning | Consequence |
+|---|---|---|
+| **Cycle length** | How often the ceremony runs | Issuance latency; must be ≤ window length |
+| **Window length** | How long an attestation is valid | Worst-case revocation delay |
+| **Batch size** | Attestations issued per cycle | Issuance ceiling |
+| **Threshold k-of-n** | Shares required to sign | Collusion resistance vs operational friction |
+
+Everything else in this note is implementation.
+
+#### 5.5.5 What this resolves, and what it does not
+
+**Resolved:** the CA cannot be a live dependency; no single party can authorise
+unilaterally; no single party can deanonymise unilaterally; remote compromise of
+the CA no longer yields the keys.
+
+**Not resolved, and worth stating plainly:**
+
+- **Metadata.** The ledger still shows *how many* commitments exist and *when*
+  they were made. Count and timing are intelligence. If commitments are made
+  shortly before use, timing reconstructs the schedule.
+- **Traffic correlation.** A pseudonym with a schedule can still be linked to a
+  source address by anyone with network visibility. Pseudonymity is not anonymity
+  when the actions are observable.
+- **The verifier.** A compromised verifier sees its own slice, and can link its
+  own pseudonyms to addresses it observes. Per-verifier scoping bounds this to one
+  service — the right bound, but not zero.
+- **The online host.** Still assumed hostile, still able to deny service. It can
+  no longer authorise.
+
 
 ---
 
@@ -585,6 +673,7 @@ Stated plainly, because a control that oversells itself stops being monitored.
 | Audit | Merkle transparency log | Tamper-evidence without consensus |
 | Multi-party authorisation | Permissioned ledger — several parties each attest a distinct fact (§5.3.2) | A single writer needs a transparency log, not consensus |
 | Accountability | Liability follows the attestation: several liability per party, bonded, under a participation agreement (§5.3.3) | — |
+| Authorising root | Air-gapped CA, **never in the online path**, with its key split k-of-n across parties (§5.5) | An online CA is an availability dependency and a single point of both authorisation and deanonymisation |
 | Concealment **and** authentication (opens the keyhole, identifies the subject) | The knock protocol (separate; per-user, per-use) | — |
 | Who agreed to access, and when | Attestation: signed record, or shared ledger if several mutually distrusting parties must agree (§5.3) | A single writer needs a transparency log, not consensus |
 
@@ -601,8 +690,9 @@ Seven rules, if you remember nothing else:
    that makes "several parties agree" mean anything (§5.3.2).
 4. **Liability follows the attestation.** Several, not joint, bonded, under one
    instrument, with a named arbiter for disputes (§5.3.3).
-5. **Decide the §5.1 question explicitly:** does the verifier cache, or does it
-   depend on the ledger being up? There is no third option.
+5. **The authorising root is offline and distributed.** Air-gap it so it cannot be
+   a live dependency, and split its key k-of-n so no single party can authorise or
+   deanonymise. Window length then *is* your revocation SLA (§5.5).
 6. **Display semantics.** A hash the user cannot read is not a control.
 7. **Separate keys per purpose.** One seed, many derived keys — never one key,
    many purposes.
