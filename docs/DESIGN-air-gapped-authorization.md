@@ -61,6 +61,55 @@ out of scope here).
 
 ---
 
+## 2.1 The end-to-end flow
+
+Four layers, each proving a different thing. Naming them separately is what keeps
+the design honest — collapsing any two is where these systems usually go wrong.
+
+| Layer | Mechanism | What it establishes |
+|---|---|---|
+| **Authorization** | Air-gapped attestation, committed to a shared ledger by several parties | That the subject is *permitted* to access, and when |
+| **Concealment** | The knock | That the knocker knows the concealment secret (see §2.2 on whether that also identifies them) |
+| **Authentication** | An exchange over an encrypted connection, firewall-scoped to the knocking address | That the peer *is* the subject |
+| **Session** | VPN, with a one-time key issued over the authenticated channel | Confidentiality and integrity for the session |
+
+The flow:
+
+1. **Pre-authorize, offline.** The air-gapped device signs an attestation —
+   subject, service, validity window, nonce. Several parties commit it to the
+   ledger. Wait N confirmations before treating it as final.
+2. **Knock.** The client derives the OTP-style sequence and the auth-port number.
+   The server consults its view of the ledger; with no valid attestation, it
+   ignores the knock and opens nothing.
+3. **Auth port opens**, scoped to the knocking address.
+4. **Authenticate** over the encrypted channel.
+5. **One-time key issued** over the authenticated channel; receipt confirmed.
+6. **VPN access granted.**
+
+Note what layer 1 buys that no other layer can: it is the only place where *more
+than one party agrees* that access is permitted. Layers 2–4 are all pairwise
+between the subject and the verifier. If the requirement really is multi-party
+agreement, layer 1 is load-bearing and the ledger is earning its cost.
+
+## 2.2 Is the concealment secret per-user or shared?
+
+This decides whether the knock is doing identification work as well as
+concealment, and it needs an explicit answer.
+
+- **Per-user** (as in the daemon in this repository): only the subject can produce
+  their sequence, so the knock *identifies* them as well as concealing. The knock
+  is then an authentication factor, and the ledger supplies authorization on top
+  of it.
+- **Shared** (one sequence for all subjects): the knock is pure concealment, and
+  step 4 carries the entire authentication burden.
+
+"Does not authorize" and "does not authenticate" are different claims. The knock
+does not authorize in either case. But in the per-user case it *does* authenticate
+— and the built system is per-user. State which one you mean, because it changes
+what layer 3 is for.
+
+---
+
 ## 3. The three components
 
 ```
@@ -220,9 +269,16 @@ There is no third option, and this is the crux:
   gates every access. An unreachable, partitioned, or rate-limiting ledger means
   nobody authenticates. Every design of this shape eventually has that outage.
 
-Pick one and write down why. The common answer is "cache, and treat the ledger as
-the record" — which is fine, but it means the ledger is an *audit* mechanism, not
-an authorisation mechanism, and §3.3 is the relevant part.
+Pick one and write down why. **For this design the answer is "cache"**, and it is
+a good fit: the attestations are *pre-committed*, so the verifier can hold the
+subset that concerns it and refresh it, with a short TTL to pick up revocations.
+That keeps ledger availability off the critical path while still letting the
+ledger be the shared record of agreement.
+
+The trade to be explicit about: a cached attestation is trusted locally until the
+TTL expires, so a *revocation* takes up to one TTL to take effect. Choose the TTL
+as a deliberate security parameter, not a performance knob, and write down the
+worst-case revocation delay.
 
 ### 5.2 The knock does not authorise — it opens the keyhole
 
@@ -259,8 +315,9 @@ access, and when**, and to permit access on the strength of that. That is an
 
 - **Agreed by several mutually distrusting parties** → a shared append-only log
   with consensus is doing real work, and a permissioned ledger is a reasonable
-  choice. This is the case where the design is right, and it is worth stating
-  plainly that it *is* right here.
+  choice. **This is the case here: the design is multi-party by intent**, so the
+  ledger is earning its cost and this is the right tool for layer 1 of §2.1. Worth
+  stating plainly rather than hedging.
 - **Written by one party, verifiable by anyone** → the attestation is a signed
   record, and a transparency log (RFC 6962; Trillian as a library) gives
   tamper-evidence plus inclusion proofs without consensus, and orders of magnitude
@@ -276,6 +333,20 @@ is a technical one: governance, membership, liability, and dispute resolution al
 have to exist first. No code bootstraps it. That is why permissioned ledgers in
 the wild — trade finance, interbank settlement — began as organisations that added
 a ledger, not the reverse.
+
+**Since the multi-party case is the one being built, that prerequisite is now on
+the critical path.** The technical design is settled; the organisational one is
+not, and it is the harder of the two. Concrete questions that need answers before
+any code is worth writing:
+
+- **Who are the parties, and what does each one attest to?** If they all attest to
+  the same fact, one of them is redundant.
+- **Who may admit a new validator, and by what process?** This is the governance
+  question, and it is the one that decides whether the ledger is trustworthy.
+- **What happens on disagreement?** A ledger orders facts; it does not resolve
+  disputes about them.
+- **Who is liable if a party attests falsely?** Without an answer, the multi-party
+  property is decorative.
 
 ### 5.4 If the ledger is public
 
