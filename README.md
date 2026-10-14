@@ -461,6 +461,29 @@ trait: the interesting logic is written once and tested once.
   you can knock from anywhere — the roaming-friendly half. *Binding* additionally
   closes the race. With the burn on and binding off, an attacker who captured a
   sequence must win a race to use it; with both on, there is no race to win.
+
+- **A race is futile *and* loud, and that is the point.** The attacker has only two
+  moves and both are bad for them:
+
+  | Move | Outcome |
+  |---|---|
+  | Replay *after* the legitimate knock | Burned. Matches nothing, the replayer accumulates failures and is banned, and the legitimate user is unaffected. **Zero gain.** |
+  | Race — inject first, drop the legitimate packets | The attacker's address is authorised, and the legitimate user's own packets then match nothing, so *their* address accumulates failures and is banned. The attacker gains a port and **no credential**. |
+
+  So the only winning move requires breaking the legitimate user's knock, and that
+  break is visible. The signature is *the same user authorised from two addresses
+  in one window* — the alert in §10. A passive attacker who captures and waits
+  gets nothing; an active one reveals themselves. The race is not a hole in the
+  design, it is a **tripwire**.
+
+  - **The cost, stated plainly:** the race locks the legitimate user out for
+    `ban_ttl_seconds` (default one hour). That is a self-inflicted denial of
+    service, bounded but real, and it is the price of the detection.
+  - **And detection is only worth having if someone is watching.** The daemon logs
+    enough to derive the signature — an authorisation from an unexpected address,
+    plus a different address accumulating failures for the same user in the same
+    window — but it does **not** emit that as an alert. That is a roadmap item,
+    not a feature.
 - **The ban is a rolling-window rate limit** (default: 5 failures per IP per
   hour), not a one-strike rule. Earlier versions banned on the first failure,
   which let an off-path attacker ban an arbitrary address with a single spoofed
