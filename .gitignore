@@ -19,6 +19,10 @@
 # (Real deployments put this in /etc/otkp, which is outside the repo anyway.)
 /otkp-data/
 
+# Working notes that are deliberately local-only: session plans, resume specs,
+# scratch design thinking. Not for publication, so not tracked.
+/.hermes/
+
 # NOTE: We deliberately DO commit `Cargo.lock`.
 # For a *binary* crate, the lock file pins exact dependency versions, which is
 # how you get reproducible, auditable builds. (For a *library* you would ignore
