@@ -1,8 +1,15 @@
 # otkp — One Time Knock Protocol
 
+> **Status: alpha (v0.1.0).** Unaudited, not deployed, and the layered
+> authorisation architecture in
+> [`docs/DESIGN-air-gapped-authorization.md`](docs/DESIGN-air-gapped-authorization.md)
+> is a *design*, not a running system — the daemon in `src/` implements one layer
+> of it. Read §11 before trusting this with anything that matters.
+
 **A time-based, one-time port-knock sequence that opens exactly one port, for
-exactly one authorised user, for a short window — and instantly bans anyone who
-knocks wrong even once.**
+exactly one authorised user, for a short window. Repeated failed knocks inside a
+rolling window trigger a rate-limited ban — not a one-strike ban, which was a
+spoofed-source denial of service and was fixed in `7e98294`.**
 
 `otkp` takes the two ideas that already protect you everywhere else and fuses
 them:
@@ -546,6 +553,36 @@ targeted attacker who can phish you, sit on your network, or own your laptop.
 That is worth having. Removing the opportunistic tier is what most real-world
 "we got breached" stories are made of. But it is not the same as being unhackable,
 and any system that claims to be is one you should trust less, not more.
+
+**Specifically on agentic and AI-driven attackers.** This gets asserted about
+designs like this one, and the honest version is narrower than it sounds.
+
+An AI agent is better than a human at exactly the things that dominate real-world
+intrusion: enumerating attack surface at scale, matching findings against known
+vulnerabilities, and generating plausible social engineering. It is not better at
+breaking cryptography, and it does not change what an attacker *needs*.
+
+That gives a clean split:
+
+- **Against the automated tier — scanning, mass exploitation, credential stuffing
+  — this design removes the target rather than defending it.** There is no port to
+  enumerate, so there is nothing for an agent to find, fingerprint, or match
+  against a CVE database. An agent that is a thousand times faster finds nothing a
+  thousand times faster. This is where the design is genuinely effective, and it
+  is the tier that fills incident reports.
+- **Against the targeted tier, AI changes nothing structural.** An agent does not
+  defeat a 256-bit key, an air gap, or a signature. It does make two things
+  cheaper: reviewing this codebase for implementation bugs, and crafting social
+  engineering convincing enough to talk a user through the residual attack in the
+  design note. Both of those cut *against* the design, not for it.
+
+So the defensible claim is: **this design is not more vulnerable to AI attackers,
+and it is substantially more resistant to the automated tier that AI makes cheap.**
+
+Not "infinitely harder". Not "unhackable". Security claims are statements about
+cost, and a claim of impossibility is one a reviewer can falsify with a single
+counterexample — which makes overclaiming not just dishonest but *ineffective*,
+because the audience most worth convincing is the one that will check.
 
 ### 11.2 Attribution: whose credential, and why that is not the same as who
 
