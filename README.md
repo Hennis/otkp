@@ -4,7 +4,7 @@
 
 # otkp — One Time Knock Protocol
 
-**Nothing to scan. A new knock and a new port every window — and each sequence works exactly once.**
+**Nothing to scan. New knock, new port, every time. Replay futility. With Rust legitimacy.**
 
 > **Status: alpha (v0.1.0).** Unaudited, not deployed, and the layered
 > authorisation architecture in
