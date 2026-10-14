@@ -403,6 +403,70 @@ A role is not a mechanism. Liability needs a legal entity, a contract that names
 it, and usually a bond or insurance. Answer: which entity, in which jurisdiction,
 bound by what instrument, and is it good for the loss?
 
+### 5.3.2 The parties, and what each attests to
+
+**The rule: each party attests only what is within its own authority and
+knowledge.** If two parties attest the same fact, one of them is redundant and the
+multi-party property is decorative.
+
+Applying it to "is this access legitimate?" yields a decomposition where each
+attestation is uniquely held:
+
+| Party | Attests | Why only it can |
+|---|---|---|
+| **Principal** (the subject) | "I hold this key and I intend this use" | Only the key holder can sign. It is the sole attestation of *intent* — no one else can speak to it. |
+| **Identity authority** | "This principal is who they claim, and is affiliated with us" | It holds the identity proofing and the affiliation records. Nobody else can attest to them. |
+| **Resource owner** | "This principal is permitted to access this resource" | It owns the resource and sets the access policy. Permission is its to give. |
+| **Independent attestor** | "This grant complies with the governing policy" | It has **no stake in the grant** — and that is the point. |
+
+**The fourth is load-bearing, and it is the one most often omitted.** Without a
+party that gains nothing from the grant, you have interested parties agreeing with
+each other, which is a contract, not a distributed trust system. The independent
+attestor is what makes "several parties agree" mean anything at all. It is also
+the hardest to obtain, because a party with no stake has no reason to participate
+except duty, regulation, or payment.
+
+**Design rule:** if you cannot name what distinguishes each party's attestation
+from every other's, you have fewer parties than you think — and the ledger is
+carrying weight it does not need to.
+
+### 5.3.3 Liability
+
+**The rule: liability follows the attestation.** Each party is liable for the truth
+of its own attestation and for nothing else.
+
+This is the *second* thing the decomposition buys, and it is easy to miss: it is
+not only a technical partition, it is a **liability partition**. If identity and
+permission were attested by a single party, you could not tell which failure
+produced a bad grant. By separating them, every failure has an owner.
+
+For that to be real rather than decorative, six things must exist:
+
+1. **A legal entity behind each attesting party.** You cannot sue a node.
+2. **A participation agreement** binding each party to the truth of its
+   attestations — and binding the principal too, who is a person rather than an
+   entity and is covered by the same instrument.
+3. **Several liability, not joint.** Each party bears only its own exposure. Joint
+   liability makes every party a guarantor of every other, which deters precisely
+   the independent attestor you most need.
+4. **Financial responsibility** — a bond or insurance per party — so liability is
+   not theoretical against a counterparty with nothing to lose.
+5. **A governing law and a forum.** Which jurisdiction, which courts or which
+   arbitration seat.
+6. **A defined process for determining that an attestation was false.** This is
+   the same arbiter as the split-view question in §5.3.1, and it is the same gap:
+   it needs a named decision-maker, not a mechanism.
+
+**On the trustee.** The earlier answer — "the trustee who holds the authority we
+issue" — is half right, and the useful half is worth keeping. A trustee is a real
+legal structure and it is the right *mechanism* for (4): it administers the bond
+pool and holds the security on behalf of the beneficiaries.
+
+But the trustee does not *bear* the liability. Liability attaches to each
+attesting party, per its own attestation. The trustee holds the money that makes
+that liability enforceable. Both roles are needed; conflating them leaves you
+unable to say who is answerable when an attestation turns out false.
+
 ### 5.4 If the ledger is public
 
 A public ledger publishes every authorisation permanently and correlatably — who
@@ -464,17 +528,24 @@ Stated plainly, because a control that oversells itself stops being monitored.
 | Authorisation | Signed token, verified locally | Verification needs a public key, not a ledger |
 | Replay protection | Nonce/counter + audience + window | — |
 | Audit | Merkle transparency log | Tamper-evidence without consensus |
-| Multi-party authorisation | Permissioned ledger — *only* if several mutually distrusting orgs all write (§5.3) | — |
+| Multi-party authorisation | Permissioned ledger — several parties each attest a distinct fact (§5.3.2) | A single writer needs a transparency log, not consensus |
+| Accountability | Liability follows the attestation: several liability per party, bonded, under a participation agreement (§5.3.3) | — |
 | Concealment **and** authentication (opens the keyhole, identifies the subject) | The knock protocol (separate; per-user, per-use) | — |
 | Who agreed to access, and when | Attestation: signed record, or shared ledger if several mutually distrusting parties must agree (§5.3) | A single writer needs a transparency log, not consensus |
 
-Four rules, if you remember nothing else:
+Six rules, if you remember nothing else:
 
-1. **The knock conceals; it does not authorise.** It opens the keyhole. Keep the
-   layers separate, and note that the built daemon currently has only this first
-   layer — the distinction is a target, not a current property (§5.2).
-2. **Decide the §5.1 question explicitly:** does the verifier cache, or does it
+1. **The knock conceals and authenticates; it does not authorise.** It opens the
+   keyhole. Keep the layers separate, and note that the built daemon currently has
+   only this first layer — the distinction is a target, not a current property
+   (§5.2, §2.2).
+2. **Every party must attest something no other party can.** If two attest the
+   same fact, one is redundant. The party with no stake in the grant is the one
+   that makes "several parties agree" mean anything (§5.3.2).
+3. **Liability follows the attestation.** Several, not joint, bonded, under one
+   instrument, with a named arbiter for disputes (§5.3.3).
+4. **Decide the §5.1 question explicitly:** does the verifier cache, or does it
    depend on the ledger being up? There is no third option.
-3. **Display semantics.** A hash the user cannot read is not a control.
-4. **Separate keys per purpose.** One seed, many derived keys — never one key,
+5. **Display semantics.** A hash the user cannot read is not a control.
+6. **Separate keys per purpose.** One seed, many derived keys — never one key,
    many purposes.
