@@ -352,6 +352,15 @@ Ordered by what actually closes the largest security gap first, not by what is
 easiest. Items marked **[planned path]** are the agreed design direction; the
 reasoning for each is recorded so a future reader does not have to re-derive it.
 
+### Related design notes
+
+- [`docs/DESIGN-air-gapped-authorization.md`](docs/DESIGN-air-gapped-authorization.md)
+  — authorising access with an air-gapped signing key, and why that component is
+  deliberately *separate* from this daemon (its key must be offline; the knock
+  secret must be online). Includes the confused-deputy requirement, the
+  transparency-log alternative to a blockchain, and what an air gap does not
+  protect against.
+
 ### Security gaps, in priority order
 
 - [x] **Replaced the hard ban with a rolling-window rate limit.** Done in
