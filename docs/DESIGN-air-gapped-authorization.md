@@ -10,6 +10,12 @@ protocol's secret must live on an online client, or the client cannot knock.
 These are two different keys with two different purposes, and they must stay
 separate (see §6).
 
+**The layering, stated once.** The knock opens the keyhole: it reveals the port,
+and nothing more. It does not authorise. Authorisation is a separate layer — a
+signed attestation, verified before access is granted. Concealment and
+authorisation are different properties, and collapsing them is the mistake this
+note exists to prevent. See §5.2.
+
 ---
 
 ## 1. What the air gap buys, stated precisely
@@ -218,46 +224,58 @@ Pick one and write down why. The common answer is "cache, and treat the ledger a
 the record" — which is fine, but it means the ledger is an *audit* mechanism, not
 an authorisation mechanism, and §3.3 is the relevant part.
 
-### 5.2 If the ledger authorises, the knock stops authorising
+### 5.2 The knock does not authorise — it opens the keyhole
 
-If acceptance depends on an entry saying "S may knock during W", then the knock
-secret is no longer what grants access — anyone could knock. The knock becomes
-**concealment only**.
+Correcting an earlier draft of this note: **the knock never authorised.** It opens
+the port. Something else is the key — the signed token, the ledger attestation,
+or the VPN handshake. Concealment and authorisation are different properties, and
+this design separates them deliberately. The knock is the keyhole, not the key.
 
-That is a legitimate architecture; concealment and authorisation are different
-properties and separating them is often the right call. But it changes what the
-knock is *for*, and it means the knock secret no longer needs to be secret.
-Decide which of these you mean:
+Two consequences worth being explicit about.
 
-- **Knock authorises, ledger records.** The knock is the boundary; the ledger is
-  audit. §3.3 applies, and a transparency log is the right tool.
-- **Ledger authorises, knock conceals.** The ledger is the boundary and needs the
-  §5.1 answer; the knock hides the port, and its secret can be published without
-  weakening authorisation.
+**The knock secret is a concealment secret, not a credential.** It still has to be
+secret — a published sequence would let anyone open the port — but a compromise of
+it does not grant access. It only exposes the authentication layer to the
+attacker, who then faces the second factor like anyone else. That is a real
+downgrade in blast radius, and it is the main argument for keeping the two layers
+separate rather than collapsing them.
 
-Having *both* authorise is two mechanisms for one job, with the weaker one still
-in the path.
+**This is a change to what the built daemon means, not a description of it.** In
+the code in this repository, the knock *is* the credential: there is no second
+layer, and knowing the secret is sufficient to be granted access. The architecture
+described here adds that second layer. Until it exists, the knock's role is
+credential, not keyhole — so the distinction is a target, not a current property.
+Say which one you mean when you describe the system, because an interviewer will
+ask.
 
-### 5.3 When a permissioned ledger is the right choice
+### 5.3 The purpose stated: an attestation record
 
-A permissioned ledger earns its cost in exactly one situation: **several mutually
-distrusting organisations must all write to one shared, ordered, tamper-evident
-log, with no central operator.**
+The stated purpose of the ledger here is to **assert who securely agreed to
+access, and when**, and to permit access on the strength of that. That is an
+*attestation*, and the design question sharpens to one thing:
 
-That is a consortium, and it is an organisational decision before it is a
-technical one — governance, membership, liability, and dispute resolution all
-have to exist first. No code bootstraps it. This is why permissioned ledgers in
-the wild (trade finance, interbank settlement) all began as organisations that
-added a ledger, not the reverse.
+> Does the attestation need to be **agreed** by more than one party, or only
+> **verifiable** by more than one?
 
-If a **single party** writes the authorisations, the consensus the ledger existed
-to provide has been removed, and what remains is a hash chain: a data structure,
-implementable over any database. A transparency log (RFC 6962; Trillian as a
-library) gives tamper-evidence plus inclusion proofs without consensus, and is
-orders of magnitude faster.
+- **Agreed by several mutually distrusting parties** → a shared append-only log
+  with consensus is doing real work, and a permissioned ledger is a reasonable
+  choice. This is the case where the design is right, and it is worth stating
+  plainly that it *is* right here.
+- **Written by one party, verifiable by anyone** → the attestation is a signed
+  record, and a transparency log (RFC 6962; Trillian as a library) gives
+  tamper-evidence plus inclusion proofs without consensus, and orders of magnitude
+  faster.
 
-So the question to answer is not "chain or no chain" but: **who writes the
-authorisations, and do they trust each other?**
+Note what makes the first case real: the parties must be mutually distrusting *and*
+all writing. A permissioned ledger where one party writes and others merely read
+has removed the consensus it existed to provide, and what remains is a hash chain
+— a data structure, implementable over any database.
+
+And the first case is a consortium, which is an organisational decision before it
+is a technical one: governance, membership, liability, and dispute resolution all
+have to exist first. No code bootstraps it. That is why permissioned ledgers in
+the wild — trade finance, interbank settlement — began as organisations that added
+a ledger, not the reverse.
 
 ### 5.4 If the ledger is public
 
@@ -321,14 +339,16 @@ Stated plainly, because a control that oversells itself stops being monitored.
 | Replay protection | Nonce/counter + audience + window | — |
 | Audit | Merkle transparency log | Tamper-evidence without consensus |
 | Multi-party authorisation | Permissioned ledger — *only* if several mutually distrusting orgs all write (§5.3) | — |
-| Concealment | The knock protocol (separate) | — |
+| Concealment (opens the keyhole) | The knock protocol (separate) | — |
+| Who agreed to access, and when | Attestation: signed record, or shared ledger if several mutually distrusting parties must agree (§5.3) | A single writer needs a transparency log, not consensus |
 
 Four rules, if you remember nothing else:
 
-1. Decide the §5.1 question explicitly: does the verifier cache, or does it
+1. **The knock conceals; it does not authorise.** It opens the keyhole. Keep the
+   layers separate, and note that the built daemon currently has only this first
+   layer — the distinction is a target, not a current property (§5.2).
+2. **Decide the §5.1 question explicitly:** does the verifier cache, or does it
    depend on the ledger being up? There is no third option.
-2. Decide the §5.2 question explicitly: does the knock authorise, or only
-   conceal? Two authorisers for one job means the weaker one is still in the path.
-3. Display semantics. A hash the user cannot read is not a control.
-4. Separate keys per purpose. One seed, many derived keys — never one key, many
-   purposes.
+3. **Display semantics.** A hash the user cannot read is not a control.
+4. **Separate keys per purpose.** One seed, many derived keys — never one key,
+   many purposes.
