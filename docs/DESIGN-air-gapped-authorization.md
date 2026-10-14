@@ -69,7 +69,7 @@ the design honest — collapsing any two is where these systems usually go wrong
 | Layer | Mechanism | What it establishes |
 |---|---|---|
 | **Authorization** | Air-gapped attestation, committed to a shared ledger by several parties | That the subject is *permitted* to access, and when |
-| **Concealment** | The knock | That the knocker knows the concealment secret (see §2.2 on whether that also identifies them) |
+| **Concealment + authentication** | The knock (per-user, per-use) | That the knocker knows the subject's secret — so it both conceals and identifies (§2.2) |
 | **Authentication** | An exchange over an encrypted connection, firewall-scoped to the knocking address | That the peer *is* the subject |
 | **Session** | VPN, with a one-time key issued over the authenticated channel | Confidentiality and integrity for the session |
 
@@ -81,7 +81,11 @@ The flow:
 2. **Knock.** The client derives the OTP-style sequence and the auth-port number.
    The server consults its view of the ledger; with no valid attestation, it
    ignores the knock and opens nothing.
-3. **Auth port opens**, scoped to the knocking address.
+3. **Auth port opens**, scoped to the knocking address. (Deriving the port
+   number from the secret is harmless but adds nothing here: once the firewall
+   scopes the port to the knocking address, no one else can reach it, so the
+   number is not protecting anything. Kept as a deliberate choice, not a
+   control.)
 4. **Authenticate** over the encrypted channel.
 5. **One-time key issued** over the authenticated channel; receipt confirmed.
 6. **VPN access granted.**
@@ -91,22 +95,22 @@ than one party agrees* that access is permitted. Layers 2–4 are all pairwise
 between the subject and the verifier. If the requirement really is multi-party
 agreement, layer 1 is load-bearing and the ledger is earning its cost.
 
-## 2.2 Is the concealment secret per-user or shared?
+## 2.2 The concealment secret: per user, per use
 
-This decides whether the knock is doing identification work as well as
-concealment, and it needs an explicit answer.
+Settled: **per-user and per-use.** Each subject has their own secret, and each use
+consumes a fresh derivation, so the knock both identifies the subject and cannot
+be replayed.
 
-- **Per-user** (as in the daemon in this repository): only the subject can produce
-  their sequence, so the knock *identifies* them as well as concealing. The knock
-  is then an authentication factor, and the ledger supplies authorization on top
-  of it.
-- **Shared** (one sequence for all subjects): the knock is pure concealment, and
-  step 4 carries the entire authentication burden.
+The consequence to state plainly: **the knock is an authentication factor.**
+"Does not authorize" remains true — the ledger supplies authorization — but the
+knock *does* authenticate, because only the subject can produce the subject's
+sequence. So layer 3 of §2.1 is confirming an already-identified subject, not
+establishing one.
 
-"Does not authorize" and "does not authenticate" are different claims. The knock
-does not authorize in either case. But in the per-user case it *does* authenticate
-— and the built system is per-user. State which one you mean, because it changes
-what layer 3 is for.
+That is a stronger position than pure concealment, and it is worth claiming
+precisely rather than understating. It also means the two layers fail
+independently: compromising the knock secret exposes the auth port but does not
+grant access, and compromising the ledger does not let an attacker knock.
 
 ---
 
@@ -348,6 +352,57 @@ any code is worth writing:
 - **Who is liable if a party attests falsely?** Without an answer, the multi-party
   property is decorative.
 
+### 5.3.1 The governance answers, and what each implies
+
+Recorded, with the consequence of each. Two of these settle the design; one is a
+gap.
+
+**Who are the parties, and what does each attest to?**
+*"Centrally authorised men; the men attest the legitimacy."*
+This does not yet say what *distinguishes* the attestations. If every party
+attests the same fact, only one is needed and the rest are decoration. The
+multi-party property holds only if each party attests something the others
+cannot — e.g. one attests employment, one attests that the service is permitted,
+one attests regulatory standing. Name the distinct claim per party, or reduce to
+one party and drop the ledger.
+
+**Who admits a new validator?**
+*"The central authority, the boss."*
+This is the decisive answer, and it changes what the ledger is. **Governance is
+centralised; integrity is distributed.** Several parties hold and extend the log,
+so no single *writer* can rewrite another's entry — but one party controls who may
+write at all.
+
+That is a legitimate architecture; it is what Fabric-style permissioned networks
+are. It is not a trustless one. Say **"centralised governance, distributed
+integrity"** and not "no central authority," because the second claim will not
+survive a five-minute interview question.
+
+Consequence: the ledger's consensus is doing less work than it appears to. The
+precise question becomes — **must the log survive a compromised operator?**
+- If yes → several independent validators are worth their cost, and the ledger is
+  the right tool.
+- If no → a transparency log with signed tree heads and gossip gives the same
+  tamper-evidence behind a trusted operator, far more cheaply.
+
+**What happens on disagreement?**
+*"We may determine one of us is compromised, maybe."*
+This is a wish, not a mechanism, and it is **the most important gap in the
+design.** Split view is precisely the failure a shared log exists to detect: two
+validators report different histories. The log can *prove* the split; it cannot
+tell you which side is honest. That requires an out-of-band process — a named
+arbiter, an arbitration clause, evidence handling — and it is a legal and
+organisational artefact, not code.
+
+Write down, before building: when two validators disagree, which view is
+authoritative for the next 24 hours, and who decides?
+
+**Who is liable if a party attests falsely?**
+*"The trustee who holds the authority we issue."*
+A role is not a mechanism. Liability needs a legal entity, a contract that names
+it, and usually a bond or insurance. Answer: which entity, in which jurisdiction,
+bound by what instrument, and is it good for the loss?
+
 ### 5.4 If the ledger is public
 
 A public ledger publishes every authorisation permanently and correlatably — who
@@ -410,7 +465,7 @@ Stated plainly, because a control that oversells itself stops being monitored.
 | Replay protection | Nonce/counter + audience + window | — |
 | Audit | Merkle transparency log | Tamper-evidence without consensus |
 | Multi-party authorisation | Permissioned ledger — *only* if several mutually distrusting orgs all write (§5.3) | — |
-| Concealment (opens the keyhole) | The knock protocol (separate) | — |
+| Concealment **and** authentication (opens the keyhole, identifies the subject) | The knock protocol (separate; per-user, per-use) | — |
 | Who agreed to access, and when | Attestation: signed record, or shared ledger if several mutually distrusting parties must agree (§5.3) | A single writer needs a transparency log, not consensus |
 
 Four rules, if you remember nothing else:
