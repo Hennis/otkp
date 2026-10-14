@@ -422,29 +422,45 @@ trait: the interesting logic is written once and tested once.
 **What it gets right**
 
 - The secret never crosses the wire. Only *derived* values do.
-- Sequences are single-use in practice: they're bound to a 30-second time step.
-- Nothing listens on the protected port until an authorised knock completes.
+- Nothing listens on the protected port until an authorised knock completes, so
+  there is nothing for a scanner to find.
+- A new knock **and** a new destination port are derived every 30-second window.
+- **Sequences are single-use.** Once a sequence has authorised anyone it is dead
+  for the rest of its window; a captured sequence replayed afterwards matches
+  nothing, and the replayer is rate-limited like any other prober.
 - Secrets are compared in constant time (`MasterSecret::ct_eq`, wired into
   `PartialEq`) and zeroised on drop.
+- `unsafe` is denied crate-wide and opted into in exactly two modules — the
+  raw-packet sniffer and the signal handler. Six blocks, six `// SAFETY:`
+  comments, no pointer arithmetic, no `unsafe fn`.
 - An off-path attacker cannot ban an arbitrary address with a single spoofed
-  packet once the rate-limit fix lands (see §10) — today, they can.
+  packet: the ban is a rolling-window rate limit, not a one-strike rule.
 
 **What you must know before trusting it**
 
-- **Source-IP binding is off by default.** Turn it on (`"bind_to_source_ip": true`)
-  and a captured sequence can only be replayed from the *same address*, which
-  closes both passive replay and the active race. The cost is that it breaks NAT
-  and mobility: the client must be told the egress address the server will see
-  (`otkp knock --bind-ip ...`). With binding off, a sequence captured on the wire
-  is replayable from anywhere for the remainder of its window. The daemon logs a
-  warning at startup when binding is off, so this is not a silent default.
+- **A replay gains reachability, not access — and reachability is the thing the
+  layer exists to deny.** The knock does not authorise; it opens a keyhole, and
+  the service behind it still authenticates. So an attacker who wins a race gets
+  an open port and *no credential* — and against a VPN or a key-authenticated
+  service, an open port with no key is worth nothing (WireGuard drops
+  unauthenticated packets regardless). But concealment is exactly what this layer
+  is for, and against a service with an exploitable surface, 30 seconds of
+  reachability is the whole ballgame. Which of those applies to you is why
+  binding is a rung you can climb to rather than a default.
 
-- **Sequences are single-use.** Once a sequence has authorised anyone it is dead
-  for the rest of its window, so a captured sequence is worthless even within the
-  window it belongs to. This is the *roaming-friendly* half of the replay defence:
-  it leaves the derivation alone, so you can knock from anywhere. The other half
-  is `bind_to_source_ip`, which additionally closes the race an on-path attacker
-  can otherwise win.
+- **Source-IP binding is off by default.** Turn it on (`"bind_to_source_ip": true`)
+  and a captured sequence matches only from the *same address*, which closes the
+  race as well as the replay: an attacker's address derives a different
+  expectation and matches nothing. The cost is that it breaks NAT and mobility —
+  the client must be told the egress address the server will see
+  (`otkp knock --bind-ip ...`). The daemon logs a warning at startup when binding
+  is off, so this is not a silent default.
+
+- **The two replay defences are complements, not alternatives.** The *burn*
+  (on by default) makes a sequence single-use and leaves the derivation alone, so
+  you can knock from anywhere — the roaming-friendly half. *Binding* additionally
+  closes the race. With the burn on and binding off, an attacker who captured a
+  sequence must win a race to use it; with both on, there is no race to win.
 - **The ban is a rolling-window rate limit** (default: 5 failures per IP per
   hour), not a one-strike rule. Earlier versions banned on the first failure,
   which let an off-path attacker ban an arbitrary address with a single spoofed
