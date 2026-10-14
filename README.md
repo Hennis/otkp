@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="A membrane-potential trace stepping upward with each knock. At the threshold it fires and resets — the same shape as a leaky integrate-and-fire neuron, and the same shape as the knock state machine." width="560">
+</p>
+
 # otkp — One Time Knock Protocol
 
 > **Status: alpha (v0.1.0).** Unaudited, not deployed, and the layered
@@ -6,23 +10,88 @@
 > is a *design*, not a running system — the daemon in `src/` implements one layer
 > of it. Read §11 before trusting this with anything that matters.
 
-**A time-based, one-time port-knock sequence that opens exactly one port, for
-exactly one authorised user, for a short window. Repeated failed knocks inside a
-rolling window trigger a rate-limited ban — not a one-strike ban, which was a
-spoofed-source denial of service and was fixed in `7e98294`.**
+---
 
-`otkp` takes the two ideas that already protect you everywhere else and fuses
-them:
+## The same thing, said three ways
 
-| Idea | What it normally protects | What we borrow from it |
+This project is documented at two altitudes throughout — every non-obvious line in
+the source carries an `EXPERT:` note and a `KID:` analogy. The front page gets the
+same treatment, because the fastest way to find out whether you understand
+something is to try to explain it to someone who does not.
+
+### The teacher's explanation
+
+`otkp` derives a one-time sequence of port numbers from a shared secret and the
+clock — the same construction as TOTP, applied to ports instead of digits — and
+opens exactly one port, for exactly one source address, for one short window.
+
+The daemon's core is a **threshold accumulator**, and that is the whole design:
+
+- Each observed knock adds to a per-address potential. A sequence that reaches its
+  length fires: the port opens, and the state resets.
+- Failures accumulate the same way against a second, higher threshold, which fires
+  into a rate-limited ban rather than an instant one.
+- The threshold is crossed by *accumulation*, never by a single packet — which is
+  what makes a spoofed packet unable to ban an address it does not own.
+
+Three separations do the security work, and collapsing any two is where this class
+of system usually fails:
+
+| Layer | Proves | Does not prove |
 |---|---|---|
-| **One-Time Password (OTP/HOTP/TOTP)** | Your login (Google Authenticator, Authy, 1Password…) | A secret + a clock → a value that changes every 30 s and can never be reused |
-| **Port knocking (`knockd`)** | A hidden SSH/backup port | A *sequence* of connection attempts that a daemon watches for, and only then opens a firewall hole |
+| **Concealment** (the knock) | The sender knows the subject's secret | That the subject is *permitted* |
+| **Authorisation** (a signed attestation) | That access was agreed, and when | That this peer holds the key |
+| **Authentication** (the service, or a VPN behind the knock) | That the peer *is* the subject | That the action is in scope |
 
-Instead of a 6-digit number, `otkp` derives a **one-time sequence of port
+Everything else — source-address binding, the security-level ratchet, the audit
+stream, the design notes on air-gapped authorisation and a deception layer — is
+elaboration on those three, each carrying its cost next to its benefit.
+
+### The student's explanation
+
+Imagine a door with no handle, no keyhole, and no sign. From outside, the wall is
+just wall — a scanner walks past and sees nothing to try.
+
+You know a secret knock. You tap it out on the wall, and the door appears.
+
+The guard inside has a clipboard. Each tap adds a mark. Enough marks in the right
+order and he unlocks the door — for *your* address only, for thirty seconds, and
+then he locks it again. Tap wrong and he marks that down too; enough wrong taps
+and he stops listening to you entirely for a while.
+
+And he never shouts "wrong!" at the first mistake, because anyone could stand
+outside your house and tap a wrong rhythm to get *you* thrown out. He counts, and
+he waits, and he writes it down.
+
+### The symbol
+
+The mark above is not a mascot. It is a **leaky integrate-and-fire neuron** — the
+canonical model in computational neuroscience, in which evidence accumulates,
+leaks away, and fires a spike when it crosses a threshold.
+
+That is also, exactly, the state machine in [`src/engine.rs`](src/engine.rs).
+Each knock steps the potential up; a complete sequence is the threshold; crossing
+it fires and the port opens; the state resets. The failure path is the same shape
+against a higher threshold, which is why a single wrong knock cannot lock anyone
+out.
+
+Drawn as a diagram rather than a cartoon because the protocol *is* a threshold
+accumulator, and a picture that says so is worth more than one that does not.
+
+
+### Where the idea comes from
+
+Two ideas that already protect you everywhere else, fused:
+
+| Idea | What it normally protects | What `otkp` borrows |
+|---|---|---|
+| **One-Time Password** (HOTP/TOTP) | Your login — Google Authenticator, Authy, 1Password | A secret plus a clock yields a value that changes every 30 s and can never be reused |
+| **Port knocking** (`knockd`) | A hidden SSH or backup port | A *sequence* of connection attempts a daemon watches for, and only then opens a firewall hole |
+
+Instead of a six-digit number, `otkp` derives a **one-time sequence of port
 numbers** *and* the **one-time destination port** that sequence unlocks. Nothing
-is open by default. There is no listening service to scan, no password to
-brute-force, and a single wrong knock gets you firewalled off.
+is open by default: there is no listening service to scan and no password to
+brute-force.
 
 ---
 
@@ -397,19 +466,26 @@ trait: the interesting logic is written once and tested once.
 
 ## 9. Architecture (top-down module map)
 
+A Cargo **workspace** with two crates. They share a convention — JSON Lines, a
+`v` field, an `event` tag — so the two event streams can be correlated
+downstream. They share **no code**, and neither depends on the other. That
+separation is a security property, not packaging: the bait must not live in the
+component that authenticates users.
+
 ```
-src/
+src/                      otkp — concealment and authentication
 ├── main.rs          ← the thinnest possible shell: parse argv, call the CLI
 ├── lib.rs           ← the library's front door: declares modules, re-exports
 ├── error.rs         ← OtkpError + Result<T> alias (one error type for the lib)
 ├── logging.rs       ← a tiny dependency-free timestamped logger
 ├── secret.rs        ← MasterSecret (zeroising 32 bytes) + base32/hex codecs
-├── config.rs        ← ServerConfig / ClientConfig / FirewallConfig (serde)
+├── config.rs        ← ServerConfig / ClientConfig / FirewallConfig / SecurityLevel
 ├── keyring.rs       ← Enrollment + Keyring: who is allowed, and their secrets
 ├── crypto.rs        ← HMAC-SHA256, HOTP (the OTP heritage), and KnockSpec
 ├── engine.rs        ← the state machine: observe(packet) → Outcome  ★ the core
 ├── auth.rs          ← who currently has an open port, and until when
 ├── banlist.rs       ← banned IPs, optionally persistent, optionally expiring
+├── audit.rs         ← the structured event stream (security level 2)
 ├── firewall.rs      ← `trait Firewall` + iptables/nftables/command/dry-run
 ├── net.rs           ← `trait KnockSource` + UDP listener + AF_PACKET sniffer
 ├── daemon.rs        ← wires a KnockSource to the Engine, plus the sweeper
@@ -420,6 +496,15 @@ src/
     ├── knock.rs     ← `otkp knock`   (the client)
     ├── serve.rs     ← `otkp serve`   (the daemon launcher)
     └── verify.rs    ← `otkp verify`  (debug: print the current sequence)
+
+decoy/                    otkp-decoy — the deception layer (rung 1)
+├── main.rs          ← the decoy daemon; observes and records, never acts
+├── lib.rs           ← front door
+├── error.rs         ← the crate's own error type (not shared, deliberately)
+├── banner.rs        ← the decoy catalogue: name, port, inert banner string
+├── trip.rs          ← classify() → Trip → Response  ★ the design
+├── audit.rs         ← the structured trip stream (same convention, own code)
+└── listener.rs      ← the TCP listener that serves banners and never reacts
 ```
 
 **Design style used throughout**
@@ -435,6 +520,10 @@ src/
 - **Commentary for two audiences.** Nearly every item carries an `EXPERT:` note
   and a `KID:` analogy. That is not decoration — writing the kid version is how
   you discover you didn't actually understand the expert version.
+- **Constraints in the type system where possible.** `decoy::Response` has no
+  variant carrying an `IpAddr`, so the code path that could revoke the wrong
+  thing does not exist. `SecurityLevel` asserts what the config must deliver, and
+  `validate` refuses a config that claims more than it does.
 
 ---
 

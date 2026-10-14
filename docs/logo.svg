@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" width="640" height="300" role="img" aria-labelledby="otkpLogoTitle otkpLogoDesc">
+  <!--
+    otkp — the threshold accumulator.
+
+    This is not a mascot. It is a diagram.
+
+    The trace is a leaky integrate-and-fire neuron, the canonical model in
+    computational neuroscience: evidence accumulates, leaks slowly, and when it
+    crosses a threshold the cell fires a spike and resets.
+
+    It is also, exactly, the otkp state machine: each knock steps the potential
+    up, the threshold is a complete sequence, crossing it fires (the port opens),
+    and the state resets. The failure path is the same shape against a higher
+    threshold, so enough wrong knocks fire into a ban.
+
+    Drawn as a diagram rather than a cartoon because the protocol is a threshold
+    accumulator, and a picture that says so is worth more than one that does not.
+  -->
+  <title id="otkpLogoTitle">otkp — the threshold accumulator</title>
+  <desc id="otkpLogoDesc">A membrane-potential trace stepping upward with each knock. A dashed threshold line crosses it; at the threshold the trace fires a spike and resets. The same shape as a leaky integrate-and-fire neuron, and the same shape as the knock state machine.</desc>
+
+  <defs>
+    <style>
+      .trace   { fill: none; stroke: #58a6ff; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .thresh  { stroke: #8b949e; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .knock   { fill: #58a6ff; }
+      .fire    { fill: #3fb950; }
+      .label   { fill: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+      .label-b { fill: #58a6ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+      .axis    { stroke: #30363d; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <!-- baseline (resting potential) -->
+  <line class="axis" x1="40" y1="272" x2="600" y2="272"/>
+
+  <!-- the threshold -->
+  <line class="thresh" x1="40" y1="130" x2="600" y2="130"/>
+  <text class="label" x="44" y="122">threshold — a complete sequence</text>
+
+  <!--
+    The trace. Four knocks step the potential up; the fourth crosses the
+    threshold, and the trace fires and resets.
+  -->
+  <path class="trace" d="
+    M 60 272
+    L 110 272
+    L 110 234
+    L 170 234
+    L 170 196
+    L 230 196
+    L 230 158
+    L 290 158
+    L 290 120
+    L 348 120
+    L 356 34
+    L 372 288
+    L 430 288
+    L 430 272
+    L 596 272
+  "/>
+
+  <!-- a marker at each knock, so the sequence is countable at a glance -->
+  <circle class="knock" cx="110" cy="234" r="4.5"/>
+  <circle class="knock" cx="170" cy="196" r="4.5"/>
+  <circle class="knock" cx="230" cy="158" r="4.5"/>
+  <circle class="knock" cx="290" cy="120" r="4.5"/>
+
+  <!-- the fire: the port opens -->
+  <circle class="fire" cx="356" cy="34" r="6"/>
+  <text class="label-b" x="374" y="38">fire — the port opens</text>
+
+  <!-- the reset, labelled so the leak-and-reset shape is legible -->
+  <text class="label" x="440" y="292">reset</text>
+
+  <!-- the knocks, labelled as a group -->
+  <text class="label-b" x="118" y="252">knocks accumulate</text>
+
+  <!-- resting potential -->
+  <text class="label" x="60" y="292">rest</text>
+</svg>
