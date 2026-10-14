@@ -1,0 +1,43 @@
+# ============================================================================
+#  decoy/Cargo.toml  --  the deception layer, as its own crate
+# ============================================================================
+#
+#  EXPERT: Deliberately NOT depending on `otkp`. See the workspace comment in
+#         the root manifest and `docs/DESIGN-deception-layer.md` §9: the bait
+#         must not live in the component that authenticates users. That
+#         separation is worth ~40 duplicated lines of event-writing code.
+#
+#         The dependency list is therefore tiny and auditable: `serde` for the
+#         event format, `serde_json` for JSON Lines. No async runtime, no HTTP
+#         stack, no TLS. A decoy that pulls in a large dependency tree is a decoy
+#         with a large attack surface, which defeats the point of building a
+#         decoy that cannot be exploited.
+#
+#  KID: A small toolbox with two tools in it. Nothing fancy, because fancy tools
+#       are the ones that break.
+# ============================================================================
+
+[package]
+name = "otkp-decoy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Deception layer for OTKP: banner decoys inside the authenticated perimeter that detect probing, not entrap attackers."
+license = "MIT OR Apache-2.0"
+
+# The library holds the logic and is unit-testable; the binary is a thin shell.
+# Same structure as the main crate, for the same reason: `tests/` can only link
+# a library, and all interesting behaviour must be reachable from a test.
+[lib]
+name = "otkp_decoy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "otkp-decoy"
+path = "src/main.rs"
+
+[dependencies]
+# Struct <-> JSON, for the structured trip stream.
+serde = { version = "1", features = ["derive"] }
+# The JSON Lines backend.
+serde_json = "1"

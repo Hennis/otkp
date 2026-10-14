@@ -130,6 +130,30 @@ zeroize = { version = "1", features = ["derive"] }
 anyhow = "1"
 
 # ---------------------------------------------------------------------------
+# [workspace] -- the deception layer lives here, as a SEPARATE crate
+# ---------------------------------------------------------------------------
+# EXPERT: `otkp-decoy` is deliberately its own package rather than a module of
+#         this one. The design note is explicit about why: the decoy is bait, and
+#         the component that authenticates users must not also run the bait.
+#         Separate packages make that structural -- separate binary, separate
+#         privileges, separate `Cargo.lock` entry, and no possibility of the two
+#         calling into each other by accident.
+#
+#         They share a *convention* (JSON Lines, a `v` version field, an `event`
+#         tag) so the two streams can be correlated downstream, but they share no
+#         code. Duplicating forty lines of event writing is cheaper than coupling
+#         the thing that authenticates users to the thing that baits attackers.
+#
+#         A workspace also means `cargo test` at the root runs both suites, and
+#         `cargo build --workspace` builds both binaries.
+# KID: The bait lives in its own toolbox. It is not allowed to sit in the same
+#      box as the lock, in case someone shakes the toolbox.
+[workspace]
+members = ["decoy"]
+# The decoy is a binary-only tool; nothing here is a published library.
+resolver = "2"
+
+# ---------------------------------------------------------------------------
 # [dev-dependencies] -- extra crates used ONLY when running tests/benches
 # ---------------------------------------------------------------------------
 # Empty for now; our tests use only the standard library and our own library.

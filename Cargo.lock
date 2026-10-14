@@ -117,6 +117,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "otkp-decoy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

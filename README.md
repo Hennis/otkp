@@ -454,13 +454,19 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
   permissioned ledger is genuinely the right choice (several mutually distrusting
   parties must *agree*, not merely verify), and what an air gap does not protect
   against.
-- [`docs/DESIGN-deception-layer.md`](docs/DESIGN-deception-layer.md) — a **future
-  project**, not part of this one: attracting automated attackers into wasting
-  resources on decoys. Records what is sound (tarpits, honeytokens, canary
-  markers), what is dangerous (real vulnerable software as bait is a real
-  foothold; decoy services are attack surface), and why AI-generated decoy files
-  are the weakest part of the idea — templates are cheaper and the value is in
-  the canary markers, not the realism.
+- [`docs/DESIGN-deception-layer.md`](docs/DESIGN-deception-layer.md) — attracting
+  automated attackers into wasting resources on decoys, and detecting intrusion
+  by **negative space**: a decoy has no legitimate use, so any interaction with
+  it is signal, whether or not the attacker sees through the pretence.
+  - **Rung 1 of this is implemented**, as a separate crate: `decoy/`, built by
+    `cargo build --workspace`, binary `otkp-decoy`. It is deliberately not part
+    of the `otkp` daemon — the bait must not live in the component that
+    authenticates users.
+  - It observes and records. It cannot revoke, block or retaliate, by
+    construction: every response is credential-scoped and there is no API that
+    names an address.
+  - Rungs 2–4 (graduated enforcement, tarpits, synthetic-data fountains) are
+    designed and not built.
 
 ### Security gaps, in priority order
 
