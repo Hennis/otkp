@@ -140,6 +140,10 @@ pub struct Options {
     pub ban_ttl: Option<u64>,
     /// Milliseconds between knocks the client should use.
     pub inter_knock_delay_ms: Option<u64>,
+    /// Which rung of the security ladder to run on (`serve` only).
+    pub security_level: Option<String>,
+    /// Where the structured audit stream is written (level 2).
+    pub audit_log: Option<String>,
 
     // ---- `init` ----
     /// Overwrite an existing configuration.
@@ -178,6 +182,8 @@ impl Default for Options {
             open_ttl: None,
             ban_ttl: None,
             inter_knock_delay_ms: None,
+            security_level: None,
+            audit_log: None,
             force: false,
             max_iterations: None,
         }
@@ -382,6 +388,8 @@ fn unknown_flag(flag: &str) -> OtkpError {
         "--open-ttl",
         "--ban-ttl",
         "--inter-knock-delay-ms",
+        "--security-level",
+        "--audit-log",
         "--max-iterations",
         "--verbose",
         "--quiet",
@@ -432,6 +440,8 @@ fn is_known_value_flag(flag: &str) -> bool {
             | "--open-ttl"
             | "--ban-ttl"
             | "--inter-knock-delay-ms"
+            | "--security-level"
+            | "--audit-log"
             | "--max-iterations"
     )
 }
@@ -482,6 +492,8 @@ fn apply_flag_value(options: &mut Options, flag: &str, value: &str) -> Result<()
         "--open-ttl" => options.open_ttl = Some(parse_u64(flag, value)?),
         "--ban-ttl" => options.ban_ttl = Some(parse_u64(flag, value)?),
         "--inter-knock-delay-ms" => options.inter_knock_delay_ms = Some(parse_u64(flag, value)?),
+        "--security-level" => options.security_level = Some(value.to_string()),
+        "--audit-log" => options.audit_log = Some(value.to_string()),
         "--max-iterations" => options.max_iterations = Some(parse_u64(flag, value)?),
         other => return Err(unknown_flag(other)),
     }
@@ -603,7 +615,8 @@ pub fn print_help() {
             "            Create a new user and print their secret ONCE.\n",
             "\n",
             "  serve     [--dir DIR] [--firewall MODE] [--source MODE]\n",
-            "            [--ban-fail-threshold N] [--ban-window SECS]\n",
+            "            [--security-level 0|1|2] [--ban-fail-threshold N]\n",
+            "            [--ban-window SECS] [--audit-log PATH]\n",
             "            Run the daemon. Firewall modes: dry-run (default),\n",
             "            iptables, nftables, command. Sources: udp (default), raw.\n",
             "\n",
@@ -620,10 +633,17 @@ pub fn print_help() {
             "  -q, --quiet            Only log warnings and errors.\n",
             "  -h, --help             Show this help.\n",
             "\n",
+            "SECURITY LEVELS (each rung adds an assurance at a named cost):\n",
+            "  0 basic             concealment + rate-limited failures. Works behind NAT.\n",
+            "  1 replay-resistant  + source-IP binding. Closes replay and the race.\n",
+            "                      Breaks NAT/mobility; clients need --bind-ip.\n",
+            "  2 auditable         + a structured JSON-lines event stream.\n",
+            "\n",
             "EXAMPLES:\n",
             "  sudo otkp init --dir /etc/otkp\n",
             "  sudo otkp enroll alice --dir /etc/otkp\n",
             "  sudo otkp serve --dir /etc/otkp --firewall dry-run\n",
+            "  sudo otkp serve --dir /etc/otkp --security-level 2 --firewall iptables\n",
             "  otkp knock --server vps.example.com --user alice --secret JBSW...\n",
             "\n",
             "See README.md and docs/PROTOCOL.md for the full story.\n",

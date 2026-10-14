@@ -42,6 +42,7 @@
 //    picks it up and keeps working, until you tell him to go home.
 // ============================================================================
 
+use crate::audit::{AuditEvent, AuditLog};
 use crate::auth::Grant;
 use crate::engine::{Clock, Engine, KnockEvent, Outcome, SweepReport};
 use crate::error::Result;
@@ -166,6 +167,16 @@ pub struct Daemon {
     source: Box<dyn KnockSource>,
     /// What time it is.
     clock: Box<dyn Clock>,
+    /// The structured audit stream (security level 2), or a disabled one.
+    ///
+    /// EXPERT: Always present, even when disabled, so no call site needs a
+    ///         branch. A disabled `AuditLog` is a no-op, which is what makes
+    ///         "level 2 is on" a property of the *config* rather than a property
+    ///         scattered through the control flow.
+    /// KID: The robot diary. Sometimes we have one, sometimes we do not; writing
+    ///      in it works either way.
+    audit: AuditLog,
+
     /// When we last ran the periodic sweep.
     ///
     /// EXPERT: We sweep at most once per second. Sweeping on every packet would
@@ -200,11 +211,34 @@ impl Daemon {
         source: Box<dyn KnockSource>,
         clock: Box<dyn Clock>,
     ) -> Self {
+        // Default to no audit stream; `with_audit` opts in. Keeping the existing
+        // four-argument constructor working means every existing caller and test
+        // is unaffected by the new level.
+        Daemon::with_audit(engine, firewall, source, clock, AuditLog::disabled())
+    }
+
+    /// Build a daemon that also writes the structured audit stream.
+    ///
+    /// EXPERT: A second constructor rather than a fifth argument on `new`,
+    ///         because the audit stream is a *security-level* concern and most
+    ///         callers (and every unit test that is not about auditing) do not
+    ///         have one. A builder-style addition keeps the common case at four
+    ///         arguments and makes the opt-in explicit at the one call site that
+    ///         needs it.
+    /// KID: "Also give me the robot diary."
+    pub fn with_audit(
+        engine: Engine,
+        firewall: Box<dyn Firewall>,
+        source: Box<dyn KnockSource>,
+        clock: Box<dyn Clock>,
+        audit: AuditLog,
+    ) -> Self {
         Daemon {
             engine,
             firewall,
             source,
             clock,
+            audit,
             // 0 means "sweep on the first iteration", which is what we want:
             // stale state from a previous run should be reconciled immediately.
             last_sweep: 0,
@@ -337,6 +371,14 @@ impl Daemon {
                             grant.expires_at,
                             grant.expires_at.saturating_sub(grant.opened_at)
                         );
+                        self.audit_write(AuditEvent::Authorised {
+                            at: grant.opened_at,
+                            ip: grant.ip,
+                            port,
+                            user: user.clone(),
+                            time_step,
+                            expires_at: grant.expires_at,
+                        });
                     }
                     Err(e) => {
                         // The firewall refused. Undo our bookkeeping so the
@@ -359,6 +401,25 @@ impl Daemon {
                 match self.firewall.ban_ip(ip) {
                     Ok(()) => {
                         crate::log_warn!("BANNED {ip} after {failures} failed knock(s)");
+                        // We record the ban only once the firewall accepted it,
+                        // so the audit stream reflects what is actually enforced
+                        // rather than what we intended. A record of an intent
+                        // that failed is a record that misleads an incident
+                        // review.
+                        let now = self.clock.now();
+                        let window = self.engine.config().ban_window_seconds;
+                        let ttl = self.engine.config().ban_ttl_seconds;
+                        self.audit_write(AuditEvent::Banned {
+                            at: now,
+                            ip,
+                            failures,
+                            window_seconds: window,
+                            expires_at: if ttl == 0 {
+                                None
+                            } else {
+                                Some(now.saturating_add(ttl))
+                            },
+                        });
                     }
                     Err(e) => {
                         // We keep the in-engine ban even if the firewall call
@@ -391,6 +452,13 @@ impl Daemon {
             match self.firewall.close_port(ip, port) {
                 Ok(()) => {
                     crate::log_info!("closed port {port} for {ip} ('{user}' window expired)");
+                    let at = self.clock.now();
+                    self.audit_write(AuditEvent::PortClosed {
+                        at,
+                        ip,
+                        port,
+                        user: user.clone(),
+                    });
                 }
                 Err(e) => {
                     // Log and continue: the next sweep will not retry (the grant
@@ -407,11 +475,39 @@ impl Daemon {
         // Lift expired bans.
         for ip in report.expired_bans {
             match self.firewall.unban_ip(ip) {
-                Ok(()) => crate::log_info!("ban expired for {ip}"),
+                Ok(()) => {
+                    crate::log_info!("ban expired for {ip}");
+                    let at = self.clock.now();
+                    self.audit_write(AuditEvent::BanExpired { at, ip });
+                }
                 Err(e) => {
                     crate::log_error!("could not remove firewall ban for {ip}: {e}");
                 }
             }
+        }
+    }
+
+    /// Write one audit record, failing soft.
+    ///
+    /// EXPERT: The single place in this project where an I/O failure is
+    ///         deliberately non-fatal. The reasoning, stated so it can be
+    ///         argued with: losing an audit record is bad, but taking down the
+    ///         access-control daemon because a disk filled is worse — it would
+    ///         deny service to legitimate users *and* stop recording, so the
+    ///         failure mode of failing hard is strictly worse than the failure
+    ///         mode of failing soft. A deployment with a regulatory obligation to
+    ///         never lose a record should use `AuditLog::write` directly and
+    ///         treat the error as fatal; the API allows that, the daemon does not
+    ///         choose it.
+    /// KID: If the diary's pen runs out, shout about it — but do not stop letting
+    ///      people through the door.
+    fn audit_write(&self, event: AuditEvent) {
+        if let Err(e) = self.audit.write(&event) {
+            crate::log_error!(
+                "AUDIT WRITE FAILED ({}): {e} — the decision above was enforced but \
+                 not recorded",
+                event.tag()
+            );
         }
     }
 

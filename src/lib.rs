@@ -116,6 +116,8 @@
 // convention only -- Rust does not care about declaration order -- but it means
 // a human can read this list and understand the architecture.
 
+/// The structured audit stream, for security level 2.
+pub mod audit; //    the machine-readable event stream
 /// Who currently has a port open, and until when.
 pub mod auth; //    who currently has a port open, until when
 /// Who is currently banned, and until when.

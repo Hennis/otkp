@@ -62,6 +62,22 @@ pub fn run(options: &Options) -> Result<()> {
     let config_path = dir.join("config.json");
     let mut config = load_config(&config_path)?;
     apply_overrides(&mut config, options)?;
+
+    // Level 2 needs somewhere to write. If the operator asked for level 2 but
+    // named no path, default it into the data directory rather than failing —
+    // "audit" without a location is a decision we can make for them, unlike
+    // *where a security log lives* in a managed deployment, which they can still
+    // override with --audit-log.
+    if config.security_level >= crate::config::SecurityLevel::Auditable
+        && config.audit_log_path.is_none()
+    {
+        let default_path = dir.join("audit.jsonl");
+        crate::log_info!(
+            "security level 2 with no audit_log_path; defaulting to {}",
+            default_path.display()
+        );
+        config.audit_log_path = Some(default_path);
+    }
     // Re-validate AFTER the overrides: an override could break an invariant
     // (e.g. `--open-ttl 0`, or a ban threshold of 0), and catching that here
     // with a clear message beats a confusing runtime behaviour.
@@ -81,6 +97,42 @@ pub fn run(options: &Options) -> Result<()> {
         )));
     }
     crate::log_info!("loaded {} enrolled user(s)", keyring.len());
+
+    // Report which rung we are on, what it buys, what it costs, and what the next
+    // rung would buy. A ratchet nobody knows how to climb is a ratchet nobody
+    // climbs, so the tool advertises the next step at the moment the operator is
+    // looking at the output.
+    let level = config.security_level;
+    crate::log_info!(
+        "security level {} ({}) — buys: {}",
+        level.number(),
+        level.name(),
+        level.buys()
+    );
+    if level > crate::config::SecurityLevel::Basic {
+        crate::log_info!("security level cost: {}", level.costs());
+    }
+    match config.next_security_level() {
+        Some(next) => crate::log_info!(
+            "next rung: level {} ({}) — would buy: {} | would cost: {}",
+            next.number(),
+            next.name(),
+            next.buys(),
+            next.costs()
+        ),
+        None => crate::log_info!("at the top rung ({})", level.name()),
+    }
+    match (
+        &config.audit_log_path,
+        level >= crate::config::SecurityLevel::Auditable,
+    ) {
+        (Some(p), true) => crate::log_info!("audit stream: {}", p.display()),
+        (None, true) => crate::log_warn!(
+            "security level 2 is set but no audit_log_path is configured; \
+             the audit stream is DISABLED"
+        ),
+        _ => {}
+    }
 
     // Report the replay posture plainly. An operator who does not know binding is
     // off cannot make an informed decision about it.
@@ -170,7 +222,8 @@ pub fn run(options: &Options) -> Result<()> {
     // ------------------------------------------------------------------
     // 7. Assemble the daemon.
     // ------------------------------------------------------------------
-    let mut daemon = Daemon::new(engine, firewall, source, Box::new(SystemClock));
+    let audit = crate::audit::AuditLog::new(config.audit_log_path.clone());
+    let mut daemon = Daemon::with_audit(engine, firewall, source, Box::new(SystemClock), audit);
 
     // ------------------------------------------------------------------
     // 8. Re-apply persisted bans to the firewall.
@@ -266,6 +319,24 @@ fn apply_overrides(config: &mut ServerConfig, options: &Options) -> Result<()> {
     if let Some(ms) = options.inter_knock_delay_ms {
         crate::log_info!("override: inter_knock_delay_ms = {ms}");
         config.inter_knock_delay_ms = ms;
+    }
+
+    // --- Security level -------------------------------------------------
+    // Applied *before* the individual overrides below, so an explicit flag can
+    // still win: `--security-level 1 --bind-ip off` is a contradictory request we
+    // want `validate` to catch, not to silently resolve one way or the other.
+    if let Some(spec) = options.security_level.as_deref() {
+        let level = crate::config::SecurityLevel::parse(spec)?;
+        crate::log_info!(
+            "override: security_level = {} ({})",
+            level.name(),
+            level.number()
+        );
+        config.apply_security_level(level);
+    }
+    if let Some(path) = options.audit_log.as_deref() {
+        crate::log_info!("override: audit_log_path = {path}");
+        config.audit_log_path = Some(std::path::PathBuf::from(path));
     }
 
     // The firewall backend is chosen by a short name on the command line and

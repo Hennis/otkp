@@ -239,8 +239,66 @@ Useful flags:
 | `--bind-ip ADDR` | `knock` | The address the server will observe, when the server binds to source IP (needed behind NAT) |
 | `--ban-fail-threshold N` | `serve` | Failures **inside the rolling window** before a ban (default `5`) |
 | `--ban-window SECS` | `serve` | Length of the rolling failure window (default `3600`) |
+| `--security-level 0\|1\|2` | `serve` | Which rung of the security ladder to run on (default `0`) |
+| `--audit-log PATH` | `serve` | Where the structured audit stream is written (level 2) |
 | `--open-ttl SECS` | `serve` | How long an opened port stays open |
 | `--ban-ttl SECS` | `serve` | `0` = permanent ban |
+
+---
+
+### 6.1 Security levels — the ratchet
+
+`otkp` is built to be *climbed*, not configured. **Level 0 is the default because
+it works anywhere and delivers the largest gain for the least effort**; each rung
+above adds one named assurance at one named cost. You climb when your threat model
+or your regulator tells you to — never because the documentation shamed you into
+it. A tool whose default is hard to deploy gets deployed at zero, or not at all.
+
+| Level | Name | Buys | Costs |
+|---|---|---|---|
+| 0 | `basic` *(default)* | Nothing to scan; failed knocks are rate-limited, not one-strike banned | None — works behind NAT and on mobile clients |
+| 1 | `replay-resistant` | A captured sequence is replayable only from the same address — closes replay **and** the active race | Breaks NAT and mobility: clients must be told the egress address (`--bind-ip`) |
+| 2 | `auditable` | A machine-readable record of every authorisation, ban and expiry | An audit file to manage, rotate and protect |
+
+```bash
+sudo otkp serve --dir /etc/otkp --security-level 2 --firewall iptables
+```
+
+**Raising the level turns on what it requires.** `--security-level 1` sets
+`bind_to_source_ip`; `--security-level 2` defaults the audit path into the data
+directory. The reverse is enforced too: a config that *claims* level 1 while
+running level 0 is **refused at startup**, because a security claim the tool does
+not enforce is worse than no claim at all. Lowering is never automatic — declaring
+a lower level does not switch off a setting you enabled by hand.
+
+At every startup the daemon prints the rung you are on, what it buys, what it
+costs, and what the next rung would buy.
+
+#### The audit stream (level 2)
+
+JSON Lines — one object per line, append-only, created `0600`:
+
+```json
+{"event":"authorised","v":1,"at":1791234567,"ip":"203.0.113.9","port":60802,"user":"alice","time_step":59707818,"expires_at":1791234597}
+{"event":"port_closed","v":1,"at":1791234597,"ip":"203.0.113.9","port":60802,"user":"alice"}
+```
+
+JSON Lines rather than a JSON array because appending a line is a single small
+`write`, which the kernel makes atomic, while appending to an array requires
+rewriting the closing bracket — neither atomic nor crash-safe. A log that corrupts
+on a crash fails exactly when it matters. Every record carries `v` (the format
+version), so a consumer can parse what it understands and skip what it does not
+rather than breaking on the first new field.
+
+Human log prose and machine records are deliberately separate: the wording of the
+human log can change without breaking anything downstream.
+
+**One deliberate exception to the project's fail-closed rule:** if the audit write
+fails, the daemon logs it loudly and *continues*. Losing a record is bad; taking
+down access control because a disk filled is worse, and would deny service to
+legitimate users *and* stop recording. A deployment with a regulatory obligation
+to never lose a record should call `AuditLog::write` directly and treat the error
+as fatal — the API allows that; the daemon does not choose it.
 
 ---
 

@@ -589,7 +589,6 @@ fn shutdown_closes_everything() {
 
 /// A source that never produces events, for tests that drive the daemon by hand.
 struct EmptySource;
-
 impl otkp::net::KnockSource for EmptySource {
     fn recv_at(&mut self, _now: u64) -> Result<Option<KnockEvent>> {
         Ok(None)
@@ -597,6 +596,187 @@ impl otkp::net::KnockSource for EmptySource {
     fn name(&self) -> &'static str {
         "empty"
     }
+}
+
+// ===========================================================================
+// Security level 2: the audit stream, end to end
+// ===========================================================================
+
+/// Read a JSON Lines audit file into parsed values.
+fn read_audit(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(path).expect("audit file must exist and be readable");
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("every audit line must be valid JSON"))
+        .collect()
+}
+
+/// A full authorisation must produce one `authorised` record, then a
+/// `port_closed` record when the window expires.
+///
+/// EXPERT: This is the end-to-end proof that level 2 does what it claims: the
+///         structured stream reflects real decisions made by the real state
+///         machine, not just that `AuditLog::write` works in isolation.
+#[test]
+fn audit_stream_records_authorise_and_close() {
+    let now = 1_700_100_000u64;
+    let cfg = config();
+    let spec = spec_at(&cfg, now);
+
+    let dir = std::env::temp_dir().join(format!("otkp-audit-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit_path = dir.join("audit.jsonl");
+    let _ = std::fs::remove_file(&audit_path);
+
+    let source = UdpKnockSource::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = source.local_addr().unwrap();
+    let firewall = RecordingFirewall::new();
+    let clock = Arc::new(FixedClock::new(now));
+
+    let engine = Engine::new(keyring(), cfg.clone(), BanList::new());
+    let mut daemon = Daemon::with_audit(
+        engine,
+        Box::new(firewall),
+        Box::new(source),
+        Box::new(ArcClock(Arc::clone(&clock))),
+        otkp::audit::AuditLog::new(Some(audit_path.clone())),
+    );
+
+    // Knock correctly.
+    let target = SendTarget {
+        host: "127.0.0.1".to_string(),
+        listen_port: addr.port(),
+        raw_mode: false,
+        inter_knock_delay_ms: 0,
+    };
+    send_knocks(&target, &spec).unwrap();
+    let processed = run_steps(&mut daemon, spec.knock_ports.len());
+    assert_eq!(processed, spec.knock_ports.len());
+
+    // Expire the window.
+    clock.set(now + cfg.open_ttl_seconds + 1);
+    let _ = daemon.step().unwrap();
+
+    let records = read_audit(&audit_path);
+    assert_eq!(
+        records.len(),
+        2,
+        "expected authorised + port_closed: {records:?}"
+    );
+
+    let auth = &records[0];
+    assert_eq!(auth["event"], "authorised");
+    assert_eq!(auth["v"], 1);
+    assert_eq!(auth["user"], "alice");
+    assert_eq!(auth["ip"], "127.0.0.1");
+    assert_eq!(auth["port"], spec.open_port);
+    assert_eq!(auth["expires_at"], now + cfg.open_ttl_seconds);
+
+    let closed = &records[1];
+    assert_eq!(closed["event"], "port_closed");
+    assert_eq!(closed["port"], spec.open_port);
+    assert_eq!(closed["user"], "alice");
+
+    // The two records must describe the same grant, or a consumer cannot pair
+    // them — which is the question an incident review asks first.
+    assert_eq!(auth["ip"], closed["ip"]);
+    assert_eq!(auth["port"], closed["port"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A ban must produce a `banned` record carrying the count and the window.
+#[test]
+fn audit_stream_records_a_ban() {
+    let now = 1_700_100_500u64;
+    let mut cfg = config();
+    // Threshold 1 so a single bad knock bans, keeping the test short.
+    cfg.ban_fail_threshold = 1;
+
+    let dir = std::env::temp_dir().join(format!("otkp-audit-ban-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit_path = dir.join("audit.jsonl");
+    let _ = std::fs::remove_file(&audit_path);
+
+    let source = UdpKnockSource::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = source.local_addr().unwrap();
+    let firewall = RecordingFirewall::new();
+
+    let engine = Engine::new(keyring(), cfg.clone(), BanList::new());
+    let mut daemon = Daemon::with_audit(
+        engine,
+        Box::new(firewall),
+        Box::new(source),
+        Box::new(FixedClock::new(now)),
+        otkp::audit::AuditLog::new(Some(audit_path.clone())),
+    );
+
+    // A port inside the knock range that is not in the sequence.
+    let spec = spec_at(&cfg, now);
+    let wrong = (40_000u16..40_100)
+        .find(|p| !spec.knock_ports.contains(p))
+        .unwrap();
+    let bad = KnockSpec {
+        user: "alice".to_string(),
+        time_step: spec.time_step,
+        knock_ports: vec![wrong],
+        open_port: 0,
+    };
+    send_knocks(
+        &SendTarget {
+            host: "127.0.0.1".to_string(),
+            listen_port: addr.port(),
+            raw_mode: false,
+            inter_knock_delay_ms: 0,
+        },
+        &bad,
+    )
+    .unwrap();
+    let _ = run_steps(&mut daemon, 1);
+
+    let records = read_audit(&audit_path);
+    assert_eq!(
+        records.len(),
+        1,
+        "expected exactly one ban record: {records:?}"
+    );
+    let r = &records[0];
+    assert_eq!(r["event"], "banned");
+    assert_eq!(r["ip"], "127.0.0.1");
+    assert_eq!(r["failures"], 1);
+    assert_eq!(r["window_seconds"], cfg.ban_window_seconds);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With no audit path (levels 0 and 1), no file is created and nothing fails.
+#[test]
+fn no_audit_file_is_created_when_disabled() {
+    let now = 1_700_100_900u64;
+    let cfg = config();
+
+    let dir = std::env::temp_dir().join(format!("otkp-audit-off-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit_path = dir.join("audit.jsonl");
+    let _ = std::fs::remove_file(&audit_path);
+
+    let source = UdpKnockSource::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let engine = Engine::new(keyring(), cfg.clone(), BanList::new());
+    let mut daemon = Daemon::new(
+        engine,
+        Box::new(RecordingFirewall::new()),
+        Box::new(source),
+        Box::new(FixedClock::new(now)),
+    );
+    // Drive a step so the daemon does work, then assert nothing was written.
+    let _ = daemon.step().unwrap();
+
+    assert!(
+        !audit_path.exists(),
+        "a disabled audit log must not create a file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Bans persisted on disk must be re-applied to the firewall at startup.
