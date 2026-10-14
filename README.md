@@ -437,6 +437,12 @@ trait: the interesting logic is written once and tested once.
   is replayable from anywhere for the remainder of its window. The daemon logs a
   warning at startup when binding is off, so this is not a silent default.
 
+- **Sequences are single-use.** Once a sequence has authorised anyone it is dead
+  for the rest of its window, so a captured sequence is worthless even within the
+  window it belongs to. This is the *roaming-friendly* half of the replay defence:
+  it leaves the derivation alone, so you can knock from anywhere. The other half
+  is `bind_to_source_ip`, which additionally closes the race an on-path attacker
+  can otherwise win.
 - **The ban is a rolling-window rate limit** (default: 5 failures per IP per
   hour), not a one-strike rule. Earlier versions banned on the first failure,
   which let an off-path attacker ban an arbitrary address with a single spoofed
@@ -580,11 +586,27 @@ reasoning for each is recorded so a future reader does not have to re-derive it.
   - **Residual:** with binding *off*, replay from another address still succeeds
     within the window. Binding on closes it; the burn (below) narrows the window
     in which a race is possible but does not remove the race by itself.
-- [ ] **Single-use sequences — the "burn" (high).** Once a
-  `(user, time_step)` sequence has authorised anyone, mark it used and never
-  accept it again for the rest of its window. This is the standard replay cache
-  (Kerberos; fwknop tracks SPA digests the same way) and it is purely
-  server-side: no protocol, client or payload change.
+- [x] **Single-use sequences — the "burn".** Implemented as
+  `single_use_sequences` (default **on**). Once a sequence has authorised
+  anyone, it is dead for the rest of its window; a replay matches nothing, falls
+  into the ordinary failure path, and the replayer is rate-limited like any other
+  prober. Purely server-side: no protocol, client or payload change.
+  - **This is the roaming-friendly replay defence.** Because it does not touch
+    the derivation, a client may knock from any address. The first use consumes
+    the sequence, so a copy of it is worthless wherever it is replayed from.
+    Verified live: a sequence used from `127.0.0.1` and replayed identically from
+    `127.0.0.2` was rejected as burned and the replayer was banned.
+  - **The burn key follows the binding mode**, and that direction is
+    load-bearing: `(user, window)` when unbound, `(user, window, address)` when
+    bound. Keying per-address while *unbound* gives no replay protection at all,
+    because the attacker replays from their own address and finds an unburned
+    entry.
+  - Cost, documented rather than hidden: with binding **off**, the burn permits
+    one knock per window per user, so a second device in the same window looks
+    exactly like a replay — because it is one. With binding **on**, each address
+    has its own sequence and multi-device works.
+  - A rollback after a failed firewall call *un-burns*, or the user would be
+    locked out for the rest of the window by a transient failure.
   - Keying the burn per `(user, step, src_ip)` is a trap: it gives *no* replay
     protection, because an attacker replaying from their own address finds an
     unburned entry. Burn per `(user, step)` and bind to `src_ip` in the

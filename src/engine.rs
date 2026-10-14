@@ -233,6 +233,24 @@ pub enum Outcome {
     },
 }
 
+/// The key for a burned sequence: which user, which window, and — when binding
+/// is on — which address.
+///
+/// EXPERT: The address component is `None` unless `bind_to_source_ip` is on, and
+///         that is the whole design of the burn. Unbound, the sequence is
+///         identical for every address, so burning it must be global or a replay
+///         from another address would find it unburned. Bound, each address has
+///         its own sequence, so the burn is per-address and multi-device works.
+///
+/// Getting this wrong in the *other* direction — keying per address while
+///         unbound — gives **no replay protection at all**, because the attacker
+///         replays from their own address and finds an unburned entry. That
+///         mistake is called out in the design note §5.2 and is asserted against
+///         by a test.
+/// KID: A note saying "this secret knock has already been used, by this person,
+///      in this time slot, from this place".
+type BurnKey = (String, u64, Option<IpAddr>);
+
 /// The cache key for a derived spec: a time step, plus the bound address.
 ///
 /// EXPERT: A named type alias rather than the bare tuple, which clippy's
@@ -410,6 +428,21 @@ pub struct Engine {
     auth: AuthTable,
     /// Per-IP progress notes.
     states: HashMap<IpAddr, IpState>,
+    /// Sequences that have already authorised someone, and when.
+    ///
+    /// EXPERT: Keyed by `BurnKey` — `(user, window, address-or-none)`. The value
+    ///         is the time it was burned, so `sweep` can purge entries whose
+    ///         window has passed; an entry only matters while its window is live,
+    ///         so this table is naturally bounded by the same skew window that
+    ///         bounds everything else.
+    ///
+    /// A replay of a burned sequence matches nothing, which routes it into
+    ///         the ordinary failure path — so a replayer accumulates failures and
+    ///         is rate-limited like any other prober. That is the right outcome
+    ///         and it falls out of the design rather than needing its own code.
+    /// KID: The list of secret knocks that have already been used up.
+    used_sequences: HashMap<BurnKey, u64>,
+
     /// Cache of derived specs, keyed by `(time step, bound source address)`.
     ///
     /// EXPERT: `Vec<(String, KnockSpec)>` per key, holding every enrolled user's
@@ -437,6 +470,7 @@ impl Engine {
             banlist,
             auth: AuthTable::new(),
             states: HashMap::new(),
+            used_sequences: HashMap::new(),
             spec_cache: HashMap::new(),
         }
     }
@@ -666,6 +700,26 @@ impl Engine {
 
             for (user, ports, open_port) in specs {
                 let key = (user.clone(), step);
+
+                // --- The burn -------------------------------------------------
+                // If this sequence has already authorised someone, it is dead.
+                // Skip it entirely: a replay then matches nothing and falls into
+                // the ordinary failure path, which rate-limits the replayer
+                // without needing any code of its own.
+                //
+                // The key's address component mirrors the binding mode. See
+                // `BurnKey` for why that direction matters.
+                if self.config.single_use_sequences {
+                    let burn_key = (user.clone(), step, bound_ip);
+                    if self.used_sequences.contains_key(&burn_key) {
+                        crate::log_debug!(
+                            "ignoring a burned sequence: user '{user}' step {step} \
+                             (already used this window)"
+                        );
+                        continue;
+                    }
+                }
+
                 // How far is this IP through this candidate? Default 0.
                 let done = self
                     .states
@@ -720,6 +774,24 @@ impl Engine {
                 event.at,
                 self.config.open_ttl_seconds,
             );
+
+            // Burn the sequence: it has now authorised someone and must not
+            // authorise anyone again for the rest of its window. Keyed exactly as
+            // the check above keyed it, or the two would disagree and the burn
+            // would be a no-op.
+            if self.config.single_use_sequences {
+                // Recompute the address component rather than carrying it out of
+                // the loop: it is a pure function of the config, and recomputing
+                // it here means the burn key and the check key cannot drift apart
+                // if the scoping is ever refactored.
+                let burn_ip = if self.config.bind_to_source_ip {
+                    Some(event.src_ip)
+                } else {
+                    None
+                };
+                let burn_key = (user.clone(), step, burn_ip);
+                let _ = self.used_sequences.insert(burn_key, event.at);
+            }
 
             // Clear this IP's candidate progress and failure count: their
             // business is concluded. Leaving the candidates would make a second,
@@ -866,6 +938,17 @@ impl Engine {
             }
         });
 
+        // Prune burned sequences whose window has passed. An entry only matters
+        // while its window is live, so this keeps the table bounded by the same
+        // skew window that bounds the spec cache -- which matters because the
+        // table is written by *successful* authorisations, i.e. by legitimate
+        // users, and would otherwise grow with uptime.
+        {
+            let live = self.candidate_steps(now);
+            self.used_sequences
+                .retain(|(_user, step, _ip), _| live.contains(step));
+        }
+
         // Prune stale *candidates* inside surviving entries. A candidate for a
         // time step outside the skew window can never be completed, so keeping
         // it would let an attacker park an IP at "2 knocks into Bob's sequence
@@ -904,7 +987,28 @@ impl Engine {
     /// KID: If we could not actually unlock the door, tear up the fridge note so
     ///      we do not get confused later.
     pub fn rollback_authorisation(&mut self, ip: IpAddr) -> Option<Grant> {
-        self.auth.take(ip)
+        // Un-burn the sequence the grant came from. Without this, a failed
+        // firewall call would leave the sequence spent and the user locked out
+        // for the rest of the window -- a "the knock worked but nothing happened
+        // and now I cannot retry" bug, which is the kind of thing that only
+        // surfaces in production.
+        //
+        // We re-derive the burn key from the grant, because the grant is the only
+        // record of which sequence produced it. The address component follows the
+        // binding mode, exactly as it did at burn time.
+        let taken = self.auth.take(ip);
+        if let Some(grant) = &taken {
+            if self.config.single_use_sequences {
+                let bound_ip = if self.config.bind_to_source_ip {
+                    Some(ip)
+                } else {
+                    None
+                };
+                let burn_key = (grant.user.clone(), grant.time_step, bound_ip);
+                let _ = self.used_sequences.remove(&burn_key);
+            }
+        }
+        taken
     }
 
     /// How many IPs we currently hold state for. For diagnostics and tests.
@@ -916,6 +1020,17 @@ impl Engine {
     /// KID: How many scribbled notes the bouncer is holding.
     pub fn tracked_ips(&self) -> usize {
         self.states.len()
+    }
+
+    /// How many sequences are currently burned. For diagnostics and tests.
+    ///
+    /// EXPERT: Same reasoning as `tracked_ips`: the burned table is written by
+    ///         *successful* authorisations, so it grows with uptime unless
+    ///         `sweep` prunes it. A test can assert the pruning works, and an
+    ///         operator can watch the number in a status dump.
+    /// KID: How many used-up secret knocks we are still remembering.
+    pub fn burned_count(&self) -> usize {
+        self.used_sequences.len()
     }
 }
 
@@ -1845,5 +1960,247 @@ mod tests {
             });
         }
         assert!(engine.auth().is_open(addr, now));
+    }
+
+    // =======================================================================
+    // The burn: single-use sequences
+    //
+    // The roaming-friendly replay defence. It does not touch the derivation, so
+    // a client can knock from anywhere; the first use consumes the sequence, so
+    // a replay from somewhere else finds it already spent.
+    // =======================================================================
+
+    /// Build an engine with the burn on and binding off (level 0).
+    fn engine_with_burn(now: u64) -> (Engine, ServerConfig, KnockSpec) {
+        let mut config = ServerConfig::default();
+        config.knock_range = PortRange::new(40_000, 40_099).unwrap();
+        config.open_range = PortRange::new(50_000, 50_009).unwrap();
+        config.knock_count_min = 3;
+        config.knock_count_max = 3;
+        config.single_use_sequences = true;
+        config.bind_to_source_ip = false;
+        config.ban_fail_threshold = 5;
+        config.ban_window_seconds = 3600;
+        config.ban_ttl_seconds = 0;
+        config.validate().expect("burn config must be valid");
+
+        let step = crate::crypto::time_step(now, config.step_seconds);
+        let spec = crate::crypto::derive_knock_spec(
+            &crate::secret::MasterSecret::from_bytes(KNOWN_SECRET),
+            "alice",
+            step,
+            &config,
+            None,
+        );
+        let engine = Engine::new(test_keyring(), config.clone(), BanList::new());
+        (engine, config, spec)
+    }
+
+    /// Knock a full sequence from `addr`, returning the final outcome.
+    fn knock_sequence(engine: &mut Engine, addr: IpAddr, spec: &KnockSpec, at: u64) -> Outcome {
+        let mut last = Outcome::Ignored;
+        for &p in &spec.knock_ports {
+            last = engine.observe(KnockEvent {
+                src_ip: addr,
+                dst_port: p,
+                at,
+            });
+        }
+        last
+    }
+
+    /// THE test for this feature: a burned sequence does not authorise twice.
+    #[test]
+    fn a_burned_sequence_cannot_authorise_a_second_time() {
+        let now = 1_000_000u64;
+        let (mut engine, _cfg, spec) = engine_with_burn(now);
+        let alice = ip(203, 0, 113, 5);
+
+        let first = knock_sequence(&mut engine, alice, &spec, now);
+        assert!(matches!(first, Outcome::Authorised { .. }), "got {first:?}");
+        assert!(engine.auth().is_open(alice, now));
+
+        // Second use from the same address. The IP already has a port open, so
+        // these are ignored rather than counted -- but the key point is that they
+        // do NOT re-authorise.
+        let second = knock_sequence(&mut engine, alice, &spec, now);
+        assert!(
+            !matches!(second, Outcome::Authorised { .. }),
+            "a burned sequence must not authorise again, got {second:?}"
+        );
+    }
+
+    /// THE replay test: a burned sequence replayed from ANOTHER address fails.
+    ///
+    /// EXPERT: This is the whole point of the burn, and it is what makes it a
+    ///         *roaming-friendly* replay defence: the derivation is untouched, so
+    ///         the client may knock from anywhere, but once the sequence is spent
+    ///         a copy of it is worthless wherever it is sent from.
+    #[test]
+    fn a_burned_sequence_replayed_from_another_address_fails() {
+        let now = 1_000_000u64;
+        let (mut engine, _cfg, spec) = engine_with_burn(now);
+        let alice = ip(203, 0, 113, 5);
+        let attacker = ip(198, 51, 100, 66);
+
+        let first = knock_sequence(&mut engine, alice, &spec, now);
+        assert!(matches!(first, Outcome::Authorised { .. }));
+        assert!(engine.auth().is_open(alice, now));
+
+        let _ = knock_sequence(&mut engine, attacker, &spec, now);
+
+        assert!(
+            !engine.auth().is_open(attacker, now),
+            "a replayed burned sequence must not authorise the replayer"
+        );
+    }
+
+    /// A replay is counted as a failure, so a replayer is rate-limited.
+    ///
+    /// EXPERT: This falls out of the design rather than needing code: a burned
+    ///         sequence matches nothing, which routes it into the ordinary
+    ///         failure path. Asserting it means a future refactor cannot
+    ///         accidentally make replays free.
+    #[test]
+    fn a_replay_accumulates_failures_like_any_other_prober() {
+        let now = 1_000_000u64;
+        let (mut engine, cfg, spec) = engine_with_burn(now);
+        let alice = ip(203, 0, 113, 5);
+        let attacker = ip(198, 51, 100, 66);
+
+        let _ = knock_sequence(&mut engine, alice, &spec, now);
+
+        // Replay repeatedly. Each burned packet matches nothing, so it counts as
+        // a failure; enough of them and the replayer is rate-limited.
+        //
+        // NOTE: we assert on the *ban list*, not on a returned outcome. The ban
+        // lands partway through a sequence, and packets after it are ignored
+        // because the address is banned -- so the last outcome of the sequence is
+        // `Ignored` even though the ban fired. An earlier version of this test
+        // asserted the outcome and failed for that reason.
+        for _ in 0..cfg.ban_fail_threshold {
+            let _ = knock_sequence(&mut engine, attacker, &spec, now);
+        }
+
+        assert!(
+            engine.banlist().is_banned(attacker, now),
+            "a persistent replayer must accumulate failures and be rate-limited"
+        );
+    }
+
+    /// With the burn OFF, the sequence is reusable -- the pre-burn behaviour.
+    #[test]
+    fn burn_disabled_permits_reuse() {
+        let now = 1_000_000u64;
+        let (_engine, mut cfg, spec) = engine_with_burn(now);
+        cfg.single_use_sequences = false;
+        let mut e = Engine::new(test_keyring(), cfg, BanList::new());
+        let a = ip(203, 0, 113, 30);
+        let b = ip(203, 0, 113, 31);
+
+        let _ = knock_sequence(&mut e, a, &spec, now);
+        assert!(e.auth().is_open(a, now));
+
+        // A second address uses the same (unburned) sequence and is authorised.
+        // This IS the replay hole the burn closes, asserted rather than assumed.
+        let _ = knock_sequence(&mut e, b, &spec, now);
+        assert!(
+            e.auth().is_open(b, now),
+            "with the burn off, the same sequence works from another address"
+        );
+    }
+
+    /// A failed firewall open must un-burn, or the user is locked out.
+    ///
+    /// EXPERT: The failure mode this guards against: the knock succeeds, the
+    ///         firewall refuses, the grant is rolled back, and the sequence is
+    ///         spent -- so the user cannot retry for the rest of the window. That
+    ///         is a "the knock worked but nothing happened and now I cannot get
+    ///         in" bug, and it would only appear in production.
+    #[test]
+    fn rollback_un_burns_the_sequence() {
+        let now = 1_000_000u64;
+        let (mut engine, _cfg, spec) = engine_with_burn(now);
+        let alice = ip(203, 0, 113, 5);
+
+        let first = knock_sequence(&mut engine, alice, &spec, now);
+        assert!(matches!(first, Outcome::Authorised { .. }));
+
+        let rolled = engine.rollback_authorisation(alice);
+        assert!(rolled.is_some());
+        assert!(!engine.auth().is_open(alice, now));
+
+        let retry = knock_sequence(&mut engine, alice, &spec, now);
+        assert!(
+            matches!(retry, Outcome::Authorised { .. }),
+            "after a rollback the sequence must be retryable, got {retry:?}"
+        );
+    }
+
+    /// Burned entries are purged when their window passes.
+    #[test]
+    fn sweep_purges_burned_sequences() {
+        let now = 1_000_000u64;
+        let (mut engine, cfg, spec) = engine_with_burn(now);
+        let alice = ip(203, 0, 113, 5);
+
+        let _ = knock_sequence(&mut engine, alice, &spec, now);
+        assert_eq!(engine.burned_count(), 1);
+
+        let later = now + cfg.step_seconds * (2 * cfg.step_skew + 3);
+        let _ = engine.sweep(later);
+        assert_eq!(
+            engine.burned_count(),
+            0,
+            "burned entries must not outlive their window"
+        );
+    }
+
+    /// With binding ON, the burn is per-address, so multi-device still works.
+    ///
+    /// EXPERT: The composition the design note describes. Bound, each address
+    ///         derives its own sequence, so burning one leaves another untouched
+    ///         -- and a replay from a third address fails at the *derivation*
+    ///         step instead.
+    #[test]
+    fn bound_mode_burns_per_address_so_multi_device_works() {
+        let now = 1_000_000u64;
+        let mut config = ServerConfig::default();
+        config.knock_range = PortRange::new(40_000, 40_099).unwrap();
+        config.open_range = PortRange::new(50_000, 50_009).unwrap();
+        config.knock_count_min = 3;
+        config.knock_count_max = 3;
+        config.single_use_sequences = true;
+        config.bind_to_source_ip = true;
+        config.ban_fail_threshold = 5;
+        config.ban_ttl_seconds = 0;
+        config.validate().unwrap();
+
+        let step = crate::crypto::time_step(now, config.step_seconds);
+        let secret = crate::secret::MasterSecret::from_bytes(KNOWN_SECRET);
+        let laptop = ip(203, 0, 113, 40);
+        let phone = ip(203, 0, 113, 41);
+
+        let spec_laptop =
+            crate::crypto::derive_knock_spec(&secret, "alice", step, &config, Some(laptop));
+        let spec_phone =
+            crate::crypto::derive_knock_spec(&secret, "alice", step, &config, Some(phone));
+        assert_ne!(
+            spec_laptop.knock_ports, spec_phone.knock_ports,
+            "the two sequences must differ, or this test proves nothing"
+        );
+
+        let mut engine = Engine::new(test_keyring(), config, BanList::new());
+
+        let _ = knock_sequence(&mut engine, laptop, &spec_laptop, now);
+        assert!(engine.auth().is_open(laptop, now));
+
+        let _ = knock_sequence(&mut engine, phone, &spec_phone, now);
+        assert!(
+            engine.auth().is_open(phone, now),
+            "the phone's own sequence must be unaffected by the laptop's burn"
+        );
+
+        assert_eq!(engine.burned_count(), 2, "two addresses burn two keys");
     }
 }

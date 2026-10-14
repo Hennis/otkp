@@ -484,6 +484,37 @@ pub struct ServerConfig {
     /// KID: How long you sit in the naughty corner. Zero means "forever".
     pub ban_ttl_seconds: u64,
 
+    /// Make each derived sequence single-use: once it has authorised anyone, it
+    /// is dead for the rest of its window.
+    ///
+    /// EXPERT: This is the "burn", and it is the **roaming-friendly** replay
+    ///         defence. Because it does not touch the derivation, a client can
+    ///         knock from any address; the first use consumes the sequence, so a
+    ///         replay from somewhere else finds it already spent.
+    ///
+    /// It is the complement of `bind_to_source_ip`, not an alternative:
+    ///
+    /// * the **burn** stops replay, but an on-path attacker who injects
+    ///             *before* the legitimate knock wins the race;
+    ///           * **binding** stops the race too, because a replay from another
+    ///             address derives a different expectation and matches nothing.
+    ///
+    /// **The burn key follows the binding mode**, and this is
+    ///         load-bearing. Unbound, the sequence is the same for every address,
+    ///         so the key is `(user, window)` and one knock per window per user
+    ///         is permitted — a second device in the same window looks exactly
+    ///         like a replay, because it *is* one. Bound, each address has its own
+    ///         sequence, so the key is `(user, window, address)` and multi-device
+    ///         works.
+    ///
+    /// So: with binding off, the burn costs you multi-device. With
+    ///         binding on, it costs nothing. See the design note §5.2.
+    /// KID: Once a secret knock has opened the door, it is used up. Knocking the
+    ///      same one again does not open the door twice — which is how we know a
+    ///      copycat is knocking.
+    #[serde(default = "default_true")]
+    pub single_use_sequences: bool,
+
     /// Bind each derived sequence to the source IP address.
     ///
     /// EXPERT: When `true`, the observed source address is an input to the HMAC,
@@ -589,6 +620,10 @@ impl Default for ServerConfig {
             ban_fail_threshold: 5,
             ban_window_seconds: 3600,
             ban_ttl_seconds: 3600,
+            // On by default: the burn costs nothing when binding is on, and at
+            // level 0 it costs multi-device, which is documented rather than
+            // hidden.
+            single_use_sequences: true,
             // Off by default: see the field docs -- enabling it breaks NAT and
             // mobility, so it must be a deliberate operator choice.
             bind_to_source_ip: false,
@@ -739,6 +774,18 @@ impl ServerConfig {
         }
         Ok(())
     }
+}
+
+/// A `serde` default of `true`.
+///
+/// EXPERT: `#[serde(default)]` on a `bool` yields `false`, which is the wrong
+///         default for a field whose whole purpose is to be on. A named helper
+///         makes the intent explicit and gives a config written before this
+///         field existed the secure behaviour rather than the insecure one.
+/// KID: If an old settings sheet does not mention this switch, we assume it is
+///      ON, because ON is the safe way round.
+fn default_true() -> bool {
+    true
 }
 
 /// Do two inclusive port ranges share at least one port?
